@@ -44,6 +44,35 @@ def bot_seed(game_seed: int, seat: int) -> int:
     return game_seed * 1_000_003 + seat * 7_919 + 1
 
 
+def is_forced(s: GameState, acts: list) -> bool:
+    """True when the only legal action can be applied without asking the agent.
+
+    MANAGE with just EndTurn still asks while a trade proposal is possible.
+    """
+    if len(acts) != 1:
+        return False
+    cfg = s.config
+    return (s.phase != Phase.MANAGE or s.trades_this_turn >= cfg.max_trades_per_turn
+            or s.manage_actions >= cfg.max_manage_actions)
+
+
+def continue_game(s: GameState, agents: Sequence[Agent], max_decisions: int = 250_000) -> GameState:
+    """Play ``s`` (mutated in place) to the end with ``agents``; used for Monte Carlo rollouts."""
+    decisions = 0
+    while s.phase != Phase.GAME_OVER:
+        p = s.decision_player
+        acts = legal_actions(s, p)
+        if is_forced(s, acts):
+            a = acts[0]
+        else:
+            a = agents[p].choose(s, p, acts)
+            decisions += 1
+            if decisions > max_decisions:
+                raise GameAborted(f"rollout exceeded {max_decisions} decisions")
+        apply(s, a)
+    return s
+
+
 def play_game(
     agents: Sequence[Agent],
     seed: int = 0,
@@ -60,17 +89,12 @@ def play_game(
     ``on_round`` is called with the state each time a new round starts.
     """
     s = new_game(len(agents), seed=seed, config=config, record=record)
-    cfg = s.config
     decisions = proposed = accepted = countered = promised = 0
     last_round = s.round
     while s.phase != Phase.GAME_OVER:
         p = s.decision_player
         acts = legal_actions(s, p)
-        if len(acts) == 1 and (
-            s.phase != Phase.MANAGE
-            or s.trades_this_turn >= cfg.max_trades_per_turn
-            or s.manage_actions >= cfg.max_manage_actions
-        ):
+        if is_forced(s, acts):
             a = acts[0]
         else:
             a = agents[p].choose(s, p, acts)

@@ -7,20 +7,21 @@ each other and against rule-based bots, with a focus on **how well they negotiat
 circuit of 11 Polish and 11 Dutch cities; prices, rents and cards are original and
 generated from simple formulas (see `src/handel/engine/board.py`). Currency: florins (fl).
 
-> Status: **Phase 1 (engine and bots)**, **Phase 2 (LLM agent interface)** and
-> **Phase 3 (negotiation)** are complete. The fair-value estimator, tournaments,
-> analysis and the replay viewer come next.
+> Status: **Phase 1 (engine and bots)**, **Phase 2 (LLM agent interface)**,
+> **Phase 3 (negotiation)** and **Phase 4 (Monte Carlo fair value)** are complete.
+> Tournaments, analysis and the replay viewer come next.
 
 ## Setup
 
 ```bash
 uv sync
-uv run pytest                    # ~230 tests, ~30 s (includes the 10k-game benchmark)
+uv run pytest                    # 250 tests, ~35 s (includes the 10k-game benchmark)
 uv run pytest -m "not slow"      # skip the benchmark
 uv run handel-sim --games 10000  # parallel bot simulation with a summary
 uv run handel-play configs/offline_demo.toml --games 3   # LLM pipeline, offline fake models
 cp .env.example .env             # then put a regular OpenRouter API key in .env
 uv run handel-play configs/claude_trio.toml --seed 1     # Claude Opus/Sonnet/Haiku vs heuristic
+uv run handel-value results/claude_trio/game_1.json      # fair value of every offer in a game
 ```
 
 `.env` is git-ignored and read automatically; a key there overrides one exported in the
@@ -131,6 +132,106 @@ Same seats and seed as the Phase 2 game: 71 rounds, 10 minutes, **$1.24** (was $
   in Phase 2: the same bankruptcy order, and Haiku won again in round 71. Model comparisons
   need many seeds with rotated seats (Phase 5).
 
+## Fair value of trades (Phase 4)
+
+`handel-value <record>` replays a recorded game and prices every offer that was on the
+table (proposals and counteroffers), using Monte Carlo rollouts. No API calls are needed.
+It writes `<record>.value.json` and prints a table.
+
+**Replay.** Records do not store decisions separately, but every decision leaves a
+distinctive first event in the log (`buy`, `build`, `trade_countered`, ...).
+`handel.replay` reads each decision back from its event, applies it, and checks that the
+engine produces exactly the recorded events. A successful replay therefore proves the
+rebuilt states are the real ones. Phase 2 logs, written before trade ids existed, replay
+as well. Phase 7's viewer will reuse this.
+
+**Win probability, not florins, is the currency.** From the state where an offer is on
+the table, `handel.fairvalue` builds four worlds and plays each to the end 1,000 times,
+with heuristic bots in every seat:
+
+| World | What happens |
+|---|---|
+| no deal | the offer is rejected |
+| deal | the offer is accepted |
+| deal ± cash | accepted, then 200 fl move from proposer to responder, or back |
+
+* **Paired rollouts.** Rollout *i* uses the same dice, card order and bot seeds in all
+  four worlds, so the differences are measured on paired games. This removes most of the
+  luck: standard errors on a change in win probability are about ±1.5 points with 1,000
+  rollouts.
+* **Hidden information.** The card decks are reshuffled in every rollout, because
+  players cannot see their order.
+* **Outputs:**
+  - **dP:** each player's change in win probability (deal minus no deal), with a
+    standard error.
+  - **Price of cash:** win probability per 100 fl, for each side.
+  - **Fair extra:** the cash adjustment (proposer → responder) that splits the deal's
+    value evenly in florins. It is the midpoint between the most the proposer could add
+    and still gain, and the least the responder needs to break even.
+* **Uncertainty on the fair extra:** its standard error comes from a bootstrap over the
+  rollouts.
+* **Speed:** about 3 s per offer on 8 cores (`--rollouts`, `--workers`). The table can
+  also show win probability every 5 rounds (`--timeline`).
+
+**When there is no fair price.** The fair price is a straight-line estimate, so the tool
+says when it can't give one:
+* When cash is plentiful, or one side has almost no chance either way, a florin's value is
+  lost in the noise. Then no price is given rather than a wild one: both sides' cash value
+  must be at least 2 standard errors above zero.
+* Prices more than 800 fl from the offer are far outside the ±200 fl actually measured,
+  so they are marked `*` as rough.
+
+**The answer depends on how the rest of the game is played.** All values assume every
+seat plays like the heuristic bot from that point on. That includes trading, which
+matters a lot:
+* With trading bots, "no deal now" still allows a deal later, on bot terms.
+* With bots that never trade (`--policy heuristic_notrade`), "no deal" means no deal ever.
+
+Deal #10 below changes sign between the two policies: −42 points for Haiku with trading
+bots, but +51 with non-trading bots, where completing any set is decisive. Different
+rollout seeds move single values by a few points; conclusions should rest on differences
+well beyond the standard errors.
+
+### Fair value of the live game (seed 1)
+
+`uv run handel-value results/claude_trio_phase3/game_1.json` (35 offers, 2 minutes):
+
+| Deal | Round | Terms | dP proposer | dP responder | Cash paid → fair |
+|---|---|---|---|---|---|
+| #9 | 16 | Opus pays Haiku for Radom | Opus +11.9 | Haiku −5.4 | 190 → 316 fl (±25) |
+| #10 | 18 | bot's Haarlem for Haiku's Eindhoven, Haiku adds cash | bot +42.4 | Haiku −42.4 | Haiku paid 140; fair is the bot paying 110 (±12) |
+| #13 | 22 | Haiku's Den Haag for Opus's Groningen + cash | Haiku +1.5 | Opus −0.5 | 140 → 103 fl (±34), no clear winner |
+| #19 | 31 | Opus's station + cash for Haiku's Kraków | Opus −0.2 | Haiku +6.3 | 200 → 42 fl (±151) |
+| #24 | 56 | bot's Amsterdam for two Haiku streets + 180 fl | 0 | 0 | game already decided |
+
+* **Haiku lost one counteroffer exchange badly.** In #10, both sides complete a set
+  (Haiku gets Haarlem, the bot Eindhoven).
+  - Haiku's own counter, a straight swap, was worth **+18 points to Haiku**.
+  - The bot countered back to its first terms, Haiku adding 140 fl, and Haiku accepted.
+    That was **−42 points**.
+  - With both sides about to build, cash decides who builds first. Here 100 fl was
+    worth about 17 points of win probability to each side, so 140 fl flipped the deal.
+    That sensitivity is the bots' building race; LLM players may weigh cash differently.
+* **Sonnet's blocking was right early, then wrong.**
+  - Opus's first offers for Kielce (#1, 200 fl; #4, two properties + 50 fl) would have
+    cost Sonnet 9.5 and 10 points. The fair cash for #1 was about 890 fl, not 200.
+  - But Sonnet also refused #2 and #6 (Groningen for Kielce), which were **win-win**:
+    +5.4 and +8.2 points for Sonnet, paid for by the other two players.
+  - From round 11 Sonnet had under 2% to win either way, so later offers could not help
+    it. They had no fair price.
+* **Opus paid too little for Radom** (#9: 190 fl vs about 316 fair). Haiku's counter of
+  230 was closer to fair than Opus's 150 or the 190 they settled on.
+* **Win probability over time.**
+  - At round 1 the seats stood at 33 / 25 / 21 / 21%. The first-player advantage shows
+    in bot games too (65 of 200 wins from seat 0).
+  - Haiku went 21% → 43% by round 21 → 100% by round 46.
+  - Opus fell from 36% to 5% between rounds 16 and 21, after spending its cash on hotels
+    on Lelystad and Radom.
+* **Haiku won anyway.** It won even though the estimator says it lost 42 points in #10.
+  The values assume bot play afterwards, and one game is one sample. Phase 5's many seeds,
+  and Phase 6's aggregate trade metrics, will show whether such losses cost LLMs wins on
+  average.
+
 ## Engine design
 
 ```
@@ -145,7 +246,9 @@ src/handel/
   llm/          observation + prompts, reply parsing, OpenRouter and fake clients, LLMAgent
   config.py     TOML seat config -> agents
   negotiation.py  rebuild negotiation threads (chat log, promises) from an event log
-  runner.py     play_game (agent loop), simulate_many (multiprocessing)
+  replay.py     rebuild every state of a recorded game from its event log (verified)
+  fairvalue.py  Monte Carlo trade values + handel-value CLI
+  runner.py     play_game (agent loop), continue_game (rollouts), simulate_many
   play.py       handel-play CLI: play configured games, save records
 ```
 
@@ -156,7 +259,7 @@ src/handel/
   `state.decision_player` says who must make it.
 * **Deterministic.** The dice RNG lives in the state, so a seed fully determines a
   game for deterministic agents. `state.clone()` snapshots everything, including
-  the RNG (this is what Monte Carlo rollouts will use in Phase 4).
+  the RNG; Monte Carlo rollouts clone a state and give it a fresh RNG.
 * **Single source of truth for legality.** `validate(state, player, action)`
   returns `None` or a human-readable reason (later fed back to LLMs on illegal moves).
   `legal_actions` enumerates exactly the actions that validate; a property test
