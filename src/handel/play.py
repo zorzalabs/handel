@@ -46,23 +46,29 @@ def play_one(cfg: RunConfig, seed: int, out_dir: Path | None = None,
     elapsed = time.perf_counter() - t0
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        negs = negotiations(state.log or [])
-        record = {
-            "seed": seed,
-            "elapsed_s": round(elapsed, 2),
-            "config": cfg.raw,
-            "result": result.to_dict(),
-            "cost_usd": total_cost(result),
-            "cost_eur": round(total_cost(result) * cfg.usd_to_eur, 6),
-            "system_prompt": system_prompt(cfg.game.max_rounds, cfg.game.max_counters),
-            "negotiation_summary": summary(negs),
-            "negotiations": negs,
-            "transcripts": {i: a.transcript for i, a in enumerate(agents) if isinstance(a, LLMAgent)},
-            "log": state.log,
-        }
+        record = game_record(cfg, seed, result, state, agents, elapsed)
         path = out_dir / f"game_{seed}.json"
         path.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
     return result
+
+
+def game_record(cfg: RunConfig, seed: int, result: GameResult, state: GameState,
+                agents: list, elapsed: float) -> dict:
+    """Everything needed to study or replay a finished game."""
+    negs = negotiations(state.log or [])
+    return {
+        "seed": seed,
+        "elapsed_s": round(elapsed, 2),
+        "config": cfg.raw,
+        "result": result.to_dict(),
+        "cost_usd": total_cost(result),
+        "cost_eur": round(total_cost(result) * cfg.usd_to_eur, 6),
+        "system_prompt": system_prompt(cfg.game.max_rounds, cfg.game.max_counters),
+        "negotiation_summary": summary(negs),
+        "negotiations": negs,
+        "transcripts": {i: a.transcript for i, a in enumerate(agents) if isinstance(a, LLMAgent)},
+        "log": state.log,
+    }
 
 
 def total_cost(result: GameResult) -> float:

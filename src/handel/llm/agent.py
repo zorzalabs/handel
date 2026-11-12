@@ -105,8 +105,9 @@ class AgentStats:
     cached_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
-    cost_usd: float = 0.0
+    cost_usd: float = 0.0  # nominal: includes replies served from the response cache
     latency_s: float = 0.0
+    response_cache_hits: int = 0  # replies replayed from the local cache (cost nothing new)
     by_kind: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -126,6 +127,7 @@ class AgentStats:
         self.reasoning_tokens += c.reasoning_tokens
         self.cost_usd += c.cost_usd
         self.latency_s += c.latency_s
+        self.response_cache_hits += c.cache_hit
 
     def to_dict(self) -> dict:
         d = asdict(self)

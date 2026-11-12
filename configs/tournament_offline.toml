@@ -1,0 +1,31 @@
+# Offline tournament: fake models and bots, no API key, no cost. Shows scheduling,
+# seat rotation, JSONL results and resume (stop it with Ctrl-C and run it again).
+#   uv run handel-tournament configs/tournament_offline.toml
+
+[tournament]
+seeds = 25          # seeds 1..25
+rotate = true       # every seed in every seat rotation: 25 x 4 = 100 games
+parallel = 4
+save_records = true
+
+[game]
+max_rounds = 150
+
+[llm]
+manage_policy = "opportunity"
+
+[[seats]]
+type = "llm"
+model = "fake/random"
+
+[[seats]]
+type = "llm"
+model = "fake/sloppy"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+
+[[seats]]
+type = "bot"
+bot = "always_buy"

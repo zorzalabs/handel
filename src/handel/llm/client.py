@@ -29,6 +29,7 @@ class Completion:
     latency_s: float = 0.0
     model: str = ""
     id: str = ""
+    cache_hit: bool = False  # answered from the local response cache (no new spend)
 
 
 @dataclass(frozen=True, slots=True)

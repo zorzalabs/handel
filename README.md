@@ -8,20 +8,22 @@ circuit of 11 Polish and 11 Dutch cities; prices, rents and cards are original a
 generated from simple formulas (see `src/handel/engine/board.py`). Currency: florins (fl).
 
 > Status: **Phase 1 (engine and bots)**, **Phase 2 (LLM agent interface)**,
-> **Phase 3 (negotiation)** and **Phase 4 (Monte Carlo fair value)** are complete.
-> Tournaments, analysis and the replay viewer come next.
+> **Phase 3 (negotiation)**, **Phase 4 (Monte Carlo fair value)** and
+> **Phase 5 (tournament runner)** are complete. Analysis and the replay viewer come next.
 
 ## Setup
 
 ```bash
 uv sync
-uv run pytest                    # 250 tests, ~35 s (includes the 10k-game benchmark)
+uv run pytest                    # 266 tests, ~30 s (includes the 10k-game benchmark)
 uv run pytest -m "not slow"      # skip the benchmark
 uv run handel-sim --games 10000  # parallel bot simulation with a summary
 uv run handel-play configs/offline_demo.toml --games 3   # LLM pipeline, offline fake models
 cp .env.example .env             # then put a regular OpenRouter API key in .env
 uv run handel-play configs/claude_trio.toml --seed 1     # Claude Opus/Sonnet/Haiku vs heuristic
 uv run handel-value results/claude_trio/game_1.json      # fair value of every offer in a game
+uv run handel-tournament configs/tournament_offline.toml # 100-game offline tournament, ~10 s
+uv run handel-tournament configs/tournament_claude.toml  # 40 Claude games, ~EUR 46, resumable
 ```
 
 `.env` is git-ignored and read automatically; a key there overrides one exported in the
@@ -232,6 +234,87 @@ well beyond the standard errors.
   and Phase 6's aggregate trade metrics, will show whether such losses cost LLMs wins on
   average.
 
+## Tournaments (Phase 5)
+
+`handel-tournament <config>` plays many games and can be stopped and restarted at any
+point. The config is a normal run config plus a `[tournament]` table:
+
+```toml
+[tournament]
+seeds = 10          # seeds 1..10 (first_seed changes the start)
+rotate = true       # every seed in every seat rotation (true, false, or 1..n rotations)
+budget_eur = 50.0   # real-money limit across all runs of this tournament
+parallel = 4        # games played at once
+save_records = true # full records (transcripts, event log) in records/
+```
+
+* **Seat rotation.** The `[[seats]]` are the entrants. In rotation *r*, seat *i* holds
+  entrant (*i* + *r*) mod *n*, so on each seed every entrant plays every seat on the
+  same dice. The first player wins about a third of bot games (Phase 4), and a single
+  seed can decide a game (Phase 3). Rotation cancels both effects within each seed.
+* **Output** in `results/<name>/`:
+  - `games.jsonl`: one line per finished game, with lineup, winner, net worths,
+    per-seat LLM stats, negotiation counts and cost. Each line is fsynced, and a torn
+    last line from a crash is dropped on the next read.
+  - `records/<game_id>.json`: the full record, readable by `handel-value` and the
+    replay viewer.
+  - `errors.jsonl`: games that raised an error. They are retried on the next run.
+  - `tournament.json`: the config and a hash of its `game`, `llm` and `seats`
+    sections. A changed config is refused in an existing directory unless you pass
+    `--force`. Seeds, budget and parallelism may change freely, so a tournament can be
+    extended with `--seeds 20`.
+* **Resume.** Re-running the same command skips finished games. A game cut off mid-way
+  is not lost:
+  - Prompts depend only on the game state and the engine is deterministic, so a replayed
+    seed sends exactly the same requests in the same order.
+  - Every reply is stored in `cache.sqlite` under a hash of (model, messages, request
+    parameters), written after each call.
+  - The replayed game is therefore answered from the cache, for free, up to where it
+    stopped, and continues with new calls from there. A test kills a game after 15
+    calls and resumes it: the result is identical to an uninterrupted run, and no call
+    is paid twice.
+* **Budget.** The same SQLite file keeps a ledger of every paid call, so the euro limit
+  holds across restarts:
+  - Before each paid call, the client refuses once the limit is reached. The game then
+    stops, unrecorded, and later resumes from the cache.
+  - Before starting a game, the runner checks that the remaining budget covers the
+    average paid cost of a game, times the number of games running.
+  - Cached replies cost nothing new.
+  - Overshoot is at most one call per running game.
+  - Raise `budget_eur` (or pass `--budget-eur`) and re-run to continue.
+* **Ctrl-C** lets running games finish their current call, then stops. A fatal API
+  error (bad key, no credits) stops the whole run instead of being counted as a failed
+  game.
+* **Costs are recorded two ways.** `cost_usd` is a game's full cost, including replies
+  replayed from the cache, so games are comparable. `fresh_cost_usd` is what that run
+  actually paid.
+* **Standings.** At the end, and with `--summary` at any time, the runner prints:
+  - games, wins and win rate per entrant;
+  - average net worth;
+  - the illegal-move rate and fallbacks;
+  - cost;
+  - wins by seat.
+
+  These are raw counts; confidence intervals come in Phase 6.
+
+Offline example (`configs/tournament_offline.toml`, 25 seeds × 4 rotations = 100 games in
+about 9 s with 4 games in parallel):
+
+```
+  entrant                games  wins win rate avg net worth illegal fallbacks      cost  wins by seat
+  heuristic                100    75    75.0%         11428       -         0 $    0.00  20/25 19/25 17/25 19/25
+  always_buy               100    24    24.0%          4063       -         0 $    0.00  6/25 5/25 5/25 8/25
+  fake/sloppy              100     1     1.0%           821   22.4%       463 $    0.00  1/25 0/25 0/25 0/25
+  fake/random              100     0     0.0%           647    0.4%         5 $    0.00  0/25 0/25 0/25 0/25
+```
+
+`configs/tournament_claude.toml` sets up the real benchmark:
+* Entrants: Opus, Sonnet and Haiku 5.5 plus the heuristic bot.
+* 10 seeds × 4 rotations = 40 games.
+* Expected cost about $50 (EUR 46), going by the $1.24 seed-1 game; the budget is
+  capped at EUR 50.
+* With `parallel = 4`, roughly 2 hours.
+
 ## Engine design
 
 ```
@@ -243,11 +326,13 @@ src/handel/
     state.py    GameState / PlayerState / GameConfig, Phase and Stage enums
     rules.py    new_game, legal_actions, validate, apply (all rule logic)
   bots/         RandomBot, AlwaysBuyBot, HeuristicBot, shared default policies
-  llm/          observation + prompts, reply parsing, OpenRouter and fake clients, LLMAgent
+  llm/          observation + prompts, reply parsing, OpenRouter and fake clients, LLMAgent,
+                prompt-hash reply cache and spend ledger (cache.py)
   config.py     TOML seat config -> agents
   negotiation.py  rebuild negotiation threads (chat log, promises) from an event log
   replay.py     rebuild every state of a recorded game from its event log (verified)
   fairvalue.py  Monte Carlo trade values + handel-value CLI
+  tournament.py seeds x seat rotations, JSONL results, resume, budget + handel-tournament CLI
   runner.py     play_game (agent loop), continue_game (rollouts), simulate_many
   play.py       handel-play CLI: play configured games, save records
 ```

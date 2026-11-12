@@ -1,0 +1,50 @@
+# Claude Opus / Sonnet / Haiku 5.5 and the heuristic bot, every seed in all 4 seat
+# rotations. Needs OPENROUTER_API_KEY in .env (a regular key, not a management key).
+#   uv run handel-tournament configs/tournament_claude.toml
+# Seed 1 cost $1.24 per game with prompt caching (Opus ~$0.87, Sonnet ~$0.33,
+# Haiku ~$0.04), so 10 seeds x 4 rotations = 40 games is about $50 / EUR 46.
+# The run stops before the budget is exceeded; re-run the same command to resume,
+# and raise budget_eur (or pass --budget-eur) to continue past it. Interrupted
+# games replay from the reply cache for free.
+
+[tournament]
+seeds = 10            # seeds 1..10
+rotate = true         # 4 rotations per seed
+budget_eur = 50.0     # real spend limit across all runs of this tournament
+parallel = 4          # games played at once (each makes one API call at a time)
+
+[game]
+max_rounds = 150
+
+[llm]
+max_tokens = 4000
+json_mode = false
+manage_policy = "opportunity"
+history_events = 12
+timeout_s = 120
+usd_to_eur = 0.92
+extra = { reasoning = { effort = "low" } }
+
+[pricing]
+"anthropic/claude-opus-5.5" = { input = 4.00, output = 20.00 }
+"anthropic/claude-sonnet-5.5" = { input = 2.00, output = 10.00 }
+"anthropic/claude-haiku-5.5" = { input = 0.10, output = 0.50 }
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-opus-5.5"
+name = "opus-5.5"
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-sonnet-5.5"
+name = "sonnet-5.5"
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-haiku-5.5"
+name = "haiku-5.5"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"

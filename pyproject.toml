@@ -12,6 +12,7 @@ dependencies = [
 handel-sim = "handel.cli:main"
 handel-play = "handel.play:main"
 handel-value = "handel.fairvalue:main"
+handel-tournament = "handel.tournament:main"
 
 [dependency-groups]
 dev = ["pytest>=8.3"]
