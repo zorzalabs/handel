@@ -1,0 +1,52 @@
+# Budget tournament: Sonnet 5.5 and Haiku 5.5 against two heuristic bots, every seed
+# in all 4 seat rotations. Opus was ~70% of the cost of a three-Claude game, so
+# leaving it out cuts a game from ~$1.13 to roughly $0.33 (Sonnet ~$0.29, Haiku
+# ~$0.04 in the seed-1 tournament game). 10 seeds x 4 rotations = 40 games, about
+# $13 / EUR 12. Needs OPENROUTER_API_KEY in .env.
+#   uv run handel-tournament configs/tournament_cheap.toml
+#   uv run handel-tournament configs/tournament_cheap.toml --max-games 4   # try one seed first
+# Two LLMs at the table still give LLM-vs-LLM negotiations; the bots add a fixed,
+# known opponent. Stop any time and re-run to resume (interrupted games replay
+# from the reply cache for free).
+
+[tournament]
+seeds = 10            # seeds 1..10
+rotate = true         # 4 rotations per seed
+budget_eur = 15.0     # real spend limit across all runs of this tournament
+parallel = 4
+
+[game]
+max_rounds = 150
+
+[llm]
+max_tokens = 4000
+json_mode = false
+manage_policy = "opportunity"
+history_events = 12
+timeout_s = 120
+usd_to_eur = 0.92
+extra = { reasoning = { effort = "low" } }
+
+[pricing]
+"anthropic/claude-sonnet-5.5" = { input = 2.00, output = 10.00 }
+"anthropic/claude-haiku-5.5" = { input = 0.10, output = 0.50 }
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-sonnet-5.5"
+name = "sonnet-5.5"
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-haiku-5.5"
+name = "haiku-5.5"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+name = "heuristic-a"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+name = "heuristic-b"

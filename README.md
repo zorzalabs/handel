@@ -8,14 +8,14 @@ circuit of 11 Polish and 11 Dutch cities; prices, rents and cards are original a
 generated from simple formulas (see `src/handel/engine/board.py`). Currency: florins (fl).
 
 > Status: **Phase 1 (engine and bots)**, **Phase 2 (LLM agent interface)**,
-> **Phase 3 (negotiation)**, **Phase 4 (Monte Carlo fair value)** and
-> **Phase 5 (tournament runner)** are complete. Analysis and the replay viewer come next.
+> **Phase 3 (negotiation)**, **Phase 4 (Monte Carlo fair value)**, **Phase 5 (tournament
+> runner)** and **Phase 6 (analysis)** are complete. The replay viewer comes next.
 
 ## Setup
 
 ```bash
 uv sync
-uv run pytest                    # 266 tests, ~30 s (includes the 10k-game benchmark)
+uv run pytest                    # 274 tests, ~35 s (includes the 10k-game benchmark)
 uv run pytest -m "not slow"      # skip the benchmark
 uv run handel-sim --games 10000  # parallel bot simulation with a summary
 uv run handel-play configs/offline_demo.toml --games 3   # LLM pipeline, offline fake models
@@ -24,6 +24,9 @@ uv run handel-play configs/claude_trio.toml --seed 1     # Claude Opus/Sonnet/Ha
 uv run handel-value results/claude_trio/game_1.json      # fair value of every offer in a game
 uv run handel-tournament configs/tournament_offline.toml # 100-game offline tournament, ~10 s
 uv run handel-tournament configs/tournament_claude.toml  # 40 Claude games, ~EUR 46, resumable
+uv run handel-tournament configs/tournament_cheap.toml   # Sonnet + Haiku, 40 games, ~EUR 12
+uv sync --group analysis                                 # matplotlib + Jupyter for charts
+uv run handel-analyze results/tournament_cheap --value   # report, CIs, trade quality, charts
 ```
 
 `.env` is git-ignored and read automatically; a key there overrides one exported in the
@@ -315,6 +318,101 @@ about 9 s with 4 games in parallel):
   capped at EUR 50.
 * With `parallel = 4`, roughly 2 hours.
 
+## Analysis (Phase 6)
+
+`handel-analyze <tournament dir>` writes `analysis/report.md`, `analysis/summary.json` and
+four charts. With `--value`, it first runs the Phase 4 fair-value estimator on every game
+that has no value report yet. That step is free, takes a few minutes per LLM game at the
+default 300 rollouts, and is skipped on later runs. `notebooks/analysis.ipynb` walks
+through the same material, with the worst accepted offers and the chat that led to each.
+
+**Outcomes, with honest intervals.**
+* **Win rate, average placement and head-to-head:**
+  - Placement runs from 1st to 4th. Survivors rank by net worth; the bankrupt rank in
+    reverse order of going out.
+  - Head-to-head is the share of shared games in which A finished above B.
+  - Placement uses every position, not just first, so it says more per game than the win
+    rate does.
+* **Bootstrapped over seeds.** The four rotations of a seed share their dice, so they are
+  not independent games. Intervals resample whole seeds (2,000 resamples) once there are at
+  least 5 seeds.
+* **Wilson as a fallback.** With fewer seeds, the report falls back to a Wilson interval
+  that treats games as independent, marked `w`. That interval is too narrow, and the report
+  says so above every small tournament.
+* **Wins by seat** checks that rotation cancelled the first-player advantage.
+
+**Negotiation behaviour** (from the records):
+* proposals per game, and the share of proposals that became deals;
+* how each entrant answered the offers it faced: accepted, countered or rejected;
+* deals and promises.
+
+**Trade quality** (from the fair-value reports). For the player answering an offer, the
+offer is:
+* **good** if accepting raised its win probability by more than 2 standard errors;
+* **bad** if accepting lowered it by more than 2 standard errors;
+* **unclear** otherwise.
+
+Per entrant, the report gives:
+* **Decision accuracy:** the share of clear offers handled correctly (good accepted, bad
+  declined).
+* **Win probability gained per deal**, and the **edge over the partner** per deal.
+* **Price vs fair:** the florins gained relative to the fair price.
+
+As in Phase 4, these values assume bot play for the rest of the game.
+
+**Charts** (matplotlib, PNG). Each entrant keeps one colour across every chart, from a
+palette checked for colour-blind safety. Every mark is also labelled, so colour is never
+the only cue.
+* `win_rates.png`: win rate with its interval and the fair-share line.
+* `head_to_head.png`: a red–grey–blue matrix.
+* `offers.png`: every offer an entrant answered, placed at its value to them. Filled
+  markers were accepted, hollow ones declined; good play is filled on the right of zero
+  and hollow on the left.
+* `timeline.png`: win probability through one game, with its deals marked.
+
+**How much data is enough.** The report ends with a table:
+
+| 95% margin | games per entrant (25% win rate) | games for a 50/50 head-to-head |
+|---|---|---|
+| ±15 points | 33 | 43 |
+| ±10 points | 73 | 97 |
+| ±5 points | 289 | 385 |
+
+These assume independent games, so the real need is a bit higher.
+* A 40-game tournament separates only large differences in win rate.
+* Trade quality accumulates faster: one LLM game has 20–35 offers on the table.
+
+### Choosing what to run
+
+| Config | Entrants | Games | Approx. cost |
+|---|---|---|---|
+| `tournament_offline.toml` | fake models + bots | 100 | free |
+| `tournament_cheap.toml` | Sonnet, Haiku, 2 heuristic bots | 40 | ~$13 / EUR 12 (budget EUR 15) |
+| `tournament_claude.toml` | Opus, Sonnet, Haiku, heuristic | 40 | ~$50 / EUR 46 (budget EUR 50) |
+
+Opus was about 70% of the cost of a three-Claude game. That is why the cheap config leaves
+it out: the table still holds two LLMs, so LLM-vs-LLM negotiation stays. To try one seed
+(four games) first: `--max-games 4`.
+
+### What the data shows so far
+
+* **Offline tournament (100 games, 25 seeds):**
+  - The heuristic bot wins 75% [67, 83], always-buy 24% [17, 31].
+  - The fake models win 0–1%.
+  - Seats 0–3 win 22–27% each, so rotation removes the seat effect.
+  - Of 787 offers valued, always-buy rejected all 566 it faced, including 46 good ones.
+    That shows the accuracy metric does what it should.
+* **Claude tournament (1 game, seed 1 rotation 0):** too little data for conclusions, and
+  the report says so. Still, one pattern repeats:
+  - The heuristic bot offered Haiku the same swap as in the Phase 3 game: Haarlem for
+    Eindhoven plus 140 fl.
+  - Haiku accepted again, saying "Haarlem completes my Cegła set". It valued completing
+    its own set and missed that the swap also completed the bot's set.
+  - It was the worst deal of the game: −65 points for Haiku, +62 for the bot. In Phase 3
+    it was −42.
+  - Opus answered correctly every clear offer it faced (4 of 4).
+  - Sonnet again refused every offer for Kielce, 10 in all.
+
 ## Engine design
 
 ```
@@ -333,6 +431,9 @@ src/handel/
   replay.py     rebuild every state of a recorded game from its event log (verified)
   fairvalue.py  Monte Carlo trade values + handel-value CLI
   tournament.py seeds x seat rotations, JSONL results, resume, budget + handel-tournament CLI
+  analysis.py   CIs (seed bootstrap, Wilson), placements, head-to-head, negotiation and
+                trade-quality metrics, report + handel-analyze CLI
+  charts.py     matplotlib charts for the report and notebook
   runner.py     play_game (agent loop), continue_game (rollouts), simulate_many
   play.py       handel-play CLI: play configured games, save records
 ```
