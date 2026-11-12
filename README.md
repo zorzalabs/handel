@@ -7,17 +7,56 @@ each other and against rule-based bots, with a focus on **how well they negotiat
 circuit of 11 Polish and 11 Dutch cities; prices, rents and cards are original and
 generated from simple formulas (see `src/handel/engine/board.py`). Currency: florins (fl).
 
-> Status: **Phase 1 – game engine and bots** is complete. LLM agents, negotiation,
-> the fair-value estimator, tournaments, analysis and the replay viewer come next.
+> Status: **Phase 1 (engine and bots)** and **Phase 2 (LLM agent interface)** are complete.
+> Multi-round negotiation, the fair-value estimator, tournaments, analysis and the
+> replay viewer come next.
 
 ## Setup
 
 ```bash
 uv sync
-uv run pytest                    # 121 tests, ~35 s (includes the 10k-game benchmark)
+uv run pytest                    # ~200 tests, ~30 s (includes the 10k-game benchmark)
 uv run pytest -m "not slow"      # skip the benchmark
 uv run handel-sim --games 10000  # parallel bot simulation with a summary
+uv run handel-play configs/offline_demo.toml --games 3   # LLM pipeline, offline fake models
+export OPENROUTER_API_KEY=...    # then edit model ids in configs/openrouter_example.toml
+uv run handel-play configs/openrouter_example.toml --seed 1
 ```
+
+## LLM agents (Phase 2)
+
+`LLMAgent` (`src/handel/llm/agent.py`) asks the model only at real decision points:
+
+| Decision | When | Reply |
+|---|---|---|
+| `buy` | landed on an affordable unowned property | `{"action": "buy" \| "decline"}` |
+| `jail` | turn starts in jail with more than one option | `{"action": "pay_fine" \| "use_card" \| "roll"}` |
+| `manage` | after moving, if there is something to build or unmortgage, or a color group is split between you and opponents | `{"actions": [{"type": "build", "property": "Emmen"}, ...], "trade": null \| {...}}` |
+| `raise_funds` | you owe more cash than you have | `{"actions": [{"type": "mortgage", "property": "..."}, ...]}` |
+| `respond` | someone offers you a trade | `{"action": "accept" \| "reject", "message": "..."}` |
+
+* **Observation:** a static system prompt (rules + full board reference, identical for all
+  seats so providers can cache it) plus a per-decision prompt: players, ownership and current
+  rents by group, your own recent history, recent trades, the question, a JSON `OPTIONS:`
+  line listing the legal moves, and the reply format. Properties can be named loosely
+  ("Lodz", "#21", "krakow glowny").
+* **Validation:** multi-action replies are replayed on a cloned state, so even-building or
+  cash problems in a sequence are caught with a precise message
+  (`action 2 (Build Emmen (#5)): build evenly: ...`).
+* **Retry and fallback:** an invalid reply gets one retry that includes the error. If the retry
+  also fails, or the API errors out, a safe default is used (decline, roll, end turn, reject,
+  or a least-damaging liquidation) and the decision is marked `fallback`.
+* **Metrics per seat:** decisions, LLM calls, `illegal_move_rate` (decisions whose first reply
+  was malformed or illegal), fallbacks, API errors, prompt/completion/cached/reasoning tokens,
+  cost in USD (from OpenRouter's `usage.cost`, or estimated from `[pricing]`) and latency.
+  `handel-play` writes one JSON per game with the result, stats, every prompt/reply transcript
+  and the full event log, and reports cost in USD and EUR.
+* **Config:** a TOML file picks a model or bot per seat, with shared `[llm]` defaults and
+  per-seat overrides (see `configs/`). Models named `fake/random` and `fake/sloppy` run
+  offline for testing.
+* **Cost estimate:** about 2,000 input tokens per call (about 1,200 of them the cacheable system
+  prompt) and roughly one decision per round, so a full game is on the order of 150–250k
+  input tokens per LLM seat.
 
 ## Engine design
 
@@ -30,7 +69,10 @@ src/handel/
     state.py    GameState / PlayerState / GameConfig, Phase and Stage enums
     rules.py    new_game, legal_actions, validate, apply (all rule logic)
   bots/         RandomBot, AlwaysBuyBot, HeuristicBot, shared default policies
+  llm/          observation + prompts, reply parsing, OpenRouter and fake clients, LLMAgent
+  config.py     TOML seat config -> agents
   runner.py     play_game (agent loop), simulate_many (multiprocessing)
+  play.py       handel-play CLI: play configured games, save records
 ```
 
 * **State machine.** `apply(state, action)` performs one decision, then runs the

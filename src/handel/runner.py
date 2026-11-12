@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 
@@ -31,6 +31,7 @@ class GameResult:
     bankrupt_order: list[int]
     trades_proposed: int
     trades_accepted: int
+    agent_stats: list[dict | None] | None = None  # per seat, for agents that track stats
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -47,16 +48,19 @@ def play_game(
     config: GameConfig | None = None,
     record: bool = False,
     max_decisions: int = 250_000,
+    on_round: Callable[[GameState], None] | None = None,
 ) -> tuple[GameResult, GameState]:
     """Play one game to completion. Fully deterministic given seed and agents.
 
     Agents are only consulted when there is a real choice: a phase with a
     single legal action is applied automatically, except MANAGE while a trade
     proposal is still possible (the agent may want to propose one).
+    ``on_round`` is called with the state each time a new round starts.
     """
     s = new_game(len(agents), seed=seed, config=config, record=record)
     cfg = s.config
     decisions = proposed = accepted = 0
+    last_round = s.round
     while s.phase != Phase.GAME_OVER:
         p = s.decision_player
         acts = legal_actions(s, p)
@@ -77,6 +81,9 @@ def play_game(
             elif t is AcceptTrade:
                 accepted += 1
         apply(s, a)
+        if on_round is not None and s.round != last_round and s.phase != Phase.GAME_OVER:
+            last_round = s.round
+            on_round(s)
     result = GameResult(
         seed=seed,
         agents=[getattr(a, "name", type(a).__name__) for a in agents],
@@ -91,6 +98,9 @@ def play_game(
         trades_proposed=proposed,
         trades_accepted=accepted,
     )
+    stats = [getattr(a, "stats", None) for a in agents]
+    if any(st is not None for st in stats):
+        result.agent_stats = [st.to_dict() if st is not None else None for st in stats]
     return result, s
 
 

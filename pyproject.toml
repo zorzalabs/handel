@@ -4,10 +4,13 @@ version = "0.1.0"
 description = "A negotiation benchmark: LLM agents play an original property-trading board game set in Polish and Dutch cities."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "httpx>=0.28.1",
+]
 
 [project.scripts]
 handel-sim = "handel.cli:main"
+handel-play = "handel.play:main"
 
 [dependency-groups]
 dev = ["pytest>=8.3"]

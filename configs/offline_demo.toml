@@ -1,0 +1,26 @@
+# Runs fully offline: "fake/*" models are local stand-ins that pick random legal
+# options ("fake/sloppy" also sends malformed or illegal replies 30% of the time,
+# to exercise retries and fallbacks). No API key needed, no cost.
+#   uv run handel-play configs/offline_demo.toml --games 3
+
+[game]
+max_rounds = 150
+
+[llm]
+manage_policy = "opportunity"
+
+[[seats]]
+type = "llm"
+model = "fake/random"
+
+[[seats]]
+type = "llm"
+model = "fake/sloppy"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+
+[[seats]]
+type = "bot"
+bot = "always_buy"

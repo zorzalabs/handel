@@ -1,0 +1,41 @@
+# Two LLM seats against two bots, through OpenRouter.
+#   export OPENROUTER_API_KEY=...
+#   uv run handel-play configs/openrouter_example.toml --seed 1
+# Replace the model ids with ones from https://openrouter.ai/models
+
+[game]
+max_rounds = 150
+
+[llm]                       # defaults for every LLM seat; any seat may override them
+temperature = 0.7
+max_tokens = 800
+json_mode = true            # sends response_format = {"type": "json_object"}
+manage_policy = "opportunity"   # or "always": ask about building/trading every turn
+history_events = 12
+timeout_s = 90
+usd_to_eur = 0.92           # used to report costs in euros; update to the current rate
+# extra = { reasoning = { effort = "low" } }   # passed through to the request body
+
+# Optional fallback prices (USD per million tokens) for providers that do not
+# report a cost in the response.
+# [pricing]
+# "vendor/model-a" = { input = 0.50, output = 1.50 }
+
+[[seats]]
+type = "llm"
+model = "vendor/model-a"
+name = "model-a"
+
+[[seats]]
+type = "llm"
+model = "vendor/model-b"
+name = "model-b"
+temperature = 0.3
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+
+[[seats]]
+type = "bot"
+bot = "random"

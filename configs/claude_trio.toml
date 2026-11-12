@@ -1,0 +1,48 @@
+# Three Claude tiers against the heuristic bot, through OpenRouter.
+#   Put OPENROUTER_API_KEY=... in .env (a regular API key, not a management key), then:
+#   uv run handel-play configs/claude_trio.toml --seed 1
+# Seed 1 without prompt caching: 71 rounds, 10 minutes, $1.93 (Opus $1.36, Sonnet $0.53,
+# Haiku $0.04). The ~2.2k-token system prompt is now cached (cache_prompt is on by
+# default for anthropic/ models), which should cut input cost by roughly 40-50%.
+# For a cheap first check, uncomment max_rounds = 30 below.
+
+[game]
+max_rounds = 150
+# max_rounds = 30
+
+[llm]
+# Current Claude models always reason and reject custom sampling settings, so no
+# temperature is sent. Low effort keeps reasoning tokens (billed as output) down;
+# max_tokens must leave room for reasoning plus the JSON reply.
+max_tokens = 4000
+json_mode = false            # the reply parser handles plain or fenced JSON
+manage_policy = "opportunity"
+history_events = 12
+timeout_s = 120
+usd_to_eur = 0.92            # update to the current rate
+extra = { reasoning = { effort = "low" } }
+
+# Fallback prices (USD per million tokens) in case a response omits the cost.
+[pricing]
+"anthropic/claude-opus-5.5" = { input = 4.00, output = 20.00 }
+"anthropic/claude-sonnet-5.5" = { input = 2.00, output = 10.00 }
+"anthropic/claude-haiku-5.5" = { input = 0.10, output = 0.50 }
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-opus-5.5"
+name = "opus-5.5"
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-sonnet-5.5"
+name = "sonnet-5.5"
+
+[[seats]]
+type = "llm"
+model = "anthropic/claude-haiku-5.5"
+name = "haiku-5.5"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
