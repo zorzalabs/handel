@@ -58,7 +58,7 @@ def test_simple_choices():
     assert parse_buy({"action": "Buy"}, 5) == Buy(5)
     assert parse_buy({"action": "decline"}, 5) == DeclineBuy(5)
     assert parse_jail({"action": "pay fine"}) == PayJailFine()
-    assert parse_response({"action": "accept", "message": "deal"}) == (True, "deal")
+    assert parse_response({"action": "accept", "message": "deal"}) == ("accept", "deal")
     with pytest.raises(ReplyError, match="must be one of"):
         parse_buy({"action": "steal"}, 5)
     with pytest.raises(ReplyError, match="missing"):

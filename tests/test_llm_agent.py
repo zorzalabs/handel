@@ -152,7 +152,7 @@ def test_trade_proposal_then_post_trade_management():
     assert act(ag, s) == EndTurn()
     assert ag.stats.decisions == 2
     second_prompt = ag.client.calls[1][1]["content"]
-    assert "Your trade was accepted" in second_prompt and "set trade to null" in second_prompt
+    assert "ended in a deal" in second_prompt and "set trade to null" in second_prompt
 
 
 def test_rejected_trade_ends_the_turn_without_asking_again():
@@ -199,12 +199,15 @@ def test_respond_to_trade():
     s = manage_state(owners={"Lelystad": 0, "Radom": 1})
     apply(s, ProposeTrade(TradeOffer(0, 1, (), (2,), 150, 0, "You get cash and a street.")))
     ag = agent('{"action": "accept", "message": "Pleasure doing business."}')
-    assert act(ag, s) == AcceptTrade()
+    assert act(ag, s) == AcceptTrade("Pleasure doing business.")
     prompt = ag.client.calls[0][1]["content"]
-    assert "P0 proposes a trade" in prompt and "You get cash and a street." in prompt
+    assert "Negotiation #1 with P0:" in prompt
+    assert 'P0 proposed: P0 gives 150 fl to you in exchange for Radom (#2). Message from P0: "You get cash and a street."' in prompt
+    assert "P0 would complete the Klei set and could build on it." in prompt
     assert "you would hold: Klei 0/2; P0 would hold: Klei 2/2 (complete set)" in prompt
-    assert ag.last_response_message == "Pleasure doing business."
+    assert "3 counteroffers left" in prompt
     assert ag.transcript[0]["message"] == "Pleasure doing business."
+    assert s.log[-1]["ev"] == "trade_accepted" and s.log[-1]["message"] == "Pleasure doing business."
 
 
 def test_raise_funds_plan_is_truncated_once_debt_is_covered():
@@ -246,7 +249,8 @@ def test_history_and_trades_appear_in_prompt():
     s.trades_this_turn = 0
     act(ag, s)
     prompt = ag.client.calls[0][1]["content"]
-    assert 'trade rejected: you give Lelystad (#1) to P1 in exchange for nothing. Message from P0: "gift"' in prompt
+    assert '[trade #1] you proposed: you give Lelystad (#1) to P1 in exchange for nothing. Message from you: "gift"' in prompt
+    assert "[trade #1] P1 rejected the latest offer." in prompt
     assert "P0 (you)" in prompt and "ROUND 1 of 150" in prompt
 
 

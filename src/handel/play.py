@@ -18,6 +18,7 @@ from .config import RunConfig, build_agents, load_config
 from .llm.agent import LLMAgent
 from .llm.client import LLMFatalError
 from .llm.observation import system_prompt
+from .negotiation import negotiations, summary
 from .engine.rules import net_worth
 from .engine.state import GameState
 from .runner import GameResult, play_game
@@ -45,6 +46,7 @@ def play_one(cfg: RunConfig, seed: int, out_dir: Path | None = None,
     elapsed = time.perf_counter() - t0
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
+        negs = negotiations(state.log or [])
         record = {
             "seed": seed,
             "elapsed_s": round(elapsed, 2),
@@ -52,7 +54,9 @@ def play_one(cfg: RunConfig, seed: int, out_dir: Path | None = None,
             "result": result.to_dict(),
             "cost_usd": total_cost(result),
             "cost_eur": round(total_cost(result) * cfg.usd_to_eur, 6),
-            "system_prompt": system_prompt(cfg.game.max_rounds),
+            "system_prompt": system_prompt(cfg.game.max_rounds, cfg.game.max_counters),
+            "negotiation_summary": summary(negs),
+            "negotiations": negs,
             "transcripts": {i: a.transcript for i, a in enumerate(agents) if isinstance(a, LLMAgent)},
             "log": state.log,
         }
@@ -67,8 +71,9 @@ def total_cost(result: GameResult) -> float:
 
 def summarize(cfg: RunConfig, result: GameResult) -> str:
     lines = [f"seed {result.seed}: winner P{result.winner} ({cfg.seats[result.winner].name}), "
-             f"{result.end_reason} after {result.rounds} rounds; trades proposed "
-             f"{result.trades_proposed}, accepted {result.trades_accepted}"]
+             f"{result.end_reason} after {result.rounds} rounds; negotiations "
+             f"{result.trades_proposed}, deals {result.trades_accepted}, counteroffers "
+             f"{result.counteroffers}, promises {result.promises}"]
     for i, seat in enumerate(cfg.seats):
         line = f"  P{i} {seat.name:<24} net worth {result.net_worth[i]:>6}"
         st = (result.agent_stats or [None] * len(cfg.seats))[i]

@@ -4,7 +4,16 @@ from helpers import manage_state, pos
 
 from handel.bots import HeuristicBot
 from handel.bots.heuristic import trade_utility
-from handel.engine import AcceptTrade, Phase, ProposeTrade, RejectTrade, TradeOffer, apply, legal_actions
+from handel.engine import (
+    AcceptTrade,
+    CounterTrade,
+    Phase,
+    ProposeTrade,
+    RejectTrade,
+    TradeOffer,
+    apply,
+    legal_actions,
+)
 from handel.runner import simulate_many
 
 
@@ -65,11 +74,17 @@ def test_heuristic_proposes_mutual_set_completing_swap():
     assert HeuristicBot().choose(s, 1, legal_actions(s, 1)) == AcceptTrade()
 
 
-def test_heuristic_rejects_lopsided_offer():
+def test_heuristic_does_not_accept_lopsided_offer():
     s = manage_state(owners={"Emmen": 0, "Kielce": 0, "Apeldoorn": 1})
     apply(s, ProposeTrade(TradeOffer(0, 1, take_props=(pos("Apeldoorn"),), give_cash=10)))
     assert s.phase == Phase.TRADE_RESPONSE
-    assert HeuristicBot().choose(s, 1, legal_actions(s, 1)) == RejectTrade()
+    a = HeuristicBot().choose(s, 1, legal_actions(s, 1))
+    assert a != AcceptTrade()
+    # it counters with a fair price instead; with counters disabled it simply rejects
+    assert type(a) is CounterTrade and a.offer.take_cash > 300
+    s2 = manage_state(owners={"Emmen": 0, "Kielce": 0, "Apeldoorn": 1}, max_counters=0)
+    apply(s2, ProposeTrade(TradeOffer(0, 1, take_props=(pos("Apeldoorn"),), give_cash=10)))
+    assert HeuristicBot().choose(s2, 1, legal_actions(s2, 1)) == RejectTrade()
 
 
 def test_trade_utility_is_zero_sum_for_plain_cash_sale():

@@ -9,8 +9,13 @@ Design notes
 ------------
 * ``apply`` mutates the state in place (needed for simulation speed). Use
   :func:`step` for a copy-on-write variant.
-* ``legal_actions`` enumerates every concrete action. ``ProposeTrade`` is
-  parametric and never enumerated; check it with :func:`validate`.
+* ``legal_actions`` enumerates every concrete action. ``ProposeTrade`` and
+  ``CounterTrade`` are parametric and never enumerated; check them with
+  :func:`validate`.
+* A negotiation is one proposal followed by up to ``max_counters``
+  counteroffers, alternating between the same two players; it ends when the
+  player facing the latest offer accepts or rejects it. Every step is logged
+  with the negotiation id (``tid``); promises are logged as separate events.
 * ``validate`` is the single source of truth: an action from
   ``legal_actions`` always validates, and ``apply`` rejects anything that
   does not (raising :class:`IllegalAction`).
@@ -36,6 +41,7 @@ from .actions import (
     Action,
     Build,
     Buy,
+    CounterTrade,
     DeclineBuy,
     EndTurn,
     Mortgage,
@@ -231,6 +237,9 @@ E_MORTGAGED = "that property is already mortgaged"
 E_NOT_MORTGAGED = "that property is not mortgaged"
 E_GROUP_BUILT = "sell all buildings in the color group first"
 E_LIMIT = "action limit for this turn reached; you must end your turn"
+MAX_MESSAGE = 500
+MAX_PROMISES = 3
+MAX_PROMISE = 200
 
 
 def _in_range(pos: object) -> bool:
@@ -360,6 +369,35 @@ def trade_error(s: GameState, o: TradeOffer) -> str | None:
     return None
 
 
+def note_error(o: TradeOffer) -> str | None:
+    """Check the free-text parts of an offer (message and promises)."""
+    if not isinstance(o.message, str) or len(o.message) > MAX_MESSAGE:
+        return f"the message must be text of at most {MAX_MESSAGE} characters"
+    if not isinstance(o.promises, tuple) or len(o.promises) > MAX_PROMISES:
+        return f"at most {MAX_PROMISES} promises per offer"
+    for pr in o.promises:
+        if not isinstance(pr, str) or not pr.strip() or len(pr) > MAX_PROMISE:
+            return f"each promise must be non-empty text of at most {MAX_PROMISE} characters"
+    return None
+
+
+def counter_error(s: GameState, player: int, o: TradeOffer) -> str | None:
+    """Check a counteroffer against the offer currently on the table."""
+    cur = s.trade
+    if cur is None:
+        return "there is no trade offer to respond to"
+    if s.counters_used >= s.config.max_counters:
+        return (f"this negotiation has used all {s.config.max_counters} counteroffers; "
+                "accept or reject the offer")
+    if not isinstance(o, TradeOffer):
+        return "offer must be a TradeOffer"
+    if o.proposer != player or o.responder != cur.proposer:
+        return f"a counteroffer must go from you back to P{cur.proposer}"
+    if o.key() == cur.mirrored().key():
+        return "that counteroffer repeats the current terms; accept the offer instead"
+    return note_error(o) or trade_error(s, o)
+
+
 def validate(s: GameState, player: int, a: Action) -> str | None:
     """Return None if ``player`` may take action ``a`` now, else a reason string."""
     ph = s.phase
@@ -414,11 +452,15 @@ def validate(s: GameState, player: int, a: Action) -> str | None:
             return "offer must be a TradeOffer"
         if a.offer.proposer != player:
             return "you must be the proposer of your own offer"
-        return trade_error(s, a.offer)
+        return note_error(a.offer) or trade_error(s, a.offer)
 
-    if t is AcceptTrade or t is RejectTrade:
+    if t is AcceptTrade or t is RejectTrade or t is CounterTrade:
         if ph != Phase.TRADE_RESPONSE:
             return "there is no trade offer to respond to"
+        if t is CounterTrade:
+            return counter_error(s, player, a.offer)
+        if not isinstance(a.message, str) or len(a.message) > MAX_MESSAGE:
+            return f"the message must be text of at most {MAX_MESSAGE} characters"
         if t is AcceptTrade:
             return trade_error(s, s.trade)  # type: ignore[arg-type]
         return None
@@ -544,24 +586,39 @@ def apply(s: GameState, a: Action) -> None:
             _ev(s, "unmortgage", p=p, pos=a.pos, amount=cost)
     elif t is ProposeTrade:
         s.trade = a.offer
+        s.trade_id += 1
+        s.thread = [a.offer]
         s.trades_this_turn += 1
         s.manage_actions += 1
         s.phase = Phase.TRADE_RESPONSE
         if rec:
-            _ev(s, "trade_proposed", p=p, offer=a.offer.to_dict())
+            _ev(s, "trade_proposed", p=p, tid=s.trade_id, offer=a.offer.to_dict())
+            _log_promises(s, a.offer)
         return  # waiting for the responder; nothing automatic happens
+    elif t is CounterTrade:
+        s.trade = a.offer
+        s.thread.append(a.offer)
+        if rec:
+            _ev(s, "trade_countered", p=p, tid=s.trade_id, step=s.counters_used,
+                offer=a.offer.to_dict())
+            _log_promises(s, a.offer)
+        return  # now the other side must answer
     elif t is AcceptTrade:
         offer = s.trade
         assert offer is not None
         _execute_trade(s, offer)
-        s.trade = None
-        s.phase = Phase.MANAGE
         if rec:
-            _ev(s, "trade_accepted", p=p, offer=offer.to_dict())
+            _ev(s, "trade_accepted", p=p, tid=s.trade_id, counters=s.counters_used,
+                offer=offer.to_dict(), message=a.message)
+        s.trade = None
+        s.thread = []
+        s.phase = Phase.MANAGE
     elif t is RejectTrade:
         if rec:
-            _ev(s, "trade_rejected", p=p, offer=s.trade.to_dict())  # type: ignore[union-attr]
+            _ev(s, "trade_rejected", p=p, tid=s.trade_id, counters=s.counters_used,
+                offer=s.trade.to_dict(), message=a.message)  # type: ignore[union-attr]
         s.trade = None
+        s.thread = []
         s.phase = Phase.MANAGE
     elif t is PayJailFine:
         pl.cash -= s.config.jail_fine
@@ -663,6 +720,11 @@ def advance(s: GameState) -> None:
 
 
 # --- Internals ------------------------------------------------------------------
+
+
+def _log_promises(s: GameState, o: TradeOffer) -> None:
+    for text in o.promises:
+        _ev(s, "promise", p=o.proposer, to=o.responder, tid=s.trade_id, text=text)
 
 
 def _ev(s: GameState, ev: str, **data: object) -> None:
@@ -902,6 +964,7 @@ def _bankrupt(s: GameState, p: int, creditor: int, reason: str) -> None:
     s.debts = [d for d in s.debts if d.debtor != p]
     if s.trade is not None and p in (s.trade.proposer, s.trade.responder):
         s.trade = None
+        s.thread = []
     if p == s.current:
         s.pending_buy = -1
     if s.log is not None:
@@ -912,6 +975,7 @@ def _bankrupt(s: GameState, p: int, creditor: int, reason: str) -> None:
 
 def _next_turn(s: GameState) -> None:
     s.trade = None
+    s.thread = []
     s.trades_this_turn = 0
     s.manage_actions = 0
     s.doubles = 0
@@ -940,6 +1004,7 @@ def _finish(s: GameState, reason: str) -> None:
     s.debts.clear()
     s.pending_buy = -1
     s.trade = None
+    s.thread = []
     alive = s.active_players()
     if len(alive) == 1:
         s.winner = alive[0]

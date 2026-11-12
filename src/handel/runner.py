@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 
 from .bots import Agent, make_bot
-from .engine.actions import AcceptTrade, ProposeTrade
+from .engine.actions import AcceptTrade, CounterTrade, ProposeTrade
 from .engine.rules import apply, legal_actions, net_worth, new_game
 from .engine.state import GameConfig, GameState, Phase
 
@@ -29,8 +29,10 @@ class GameResult:
     net_worth: list[int]
     cash: list[int]
     bankrupt_order: list[int]
-    trades_proposed: int
-    trades_accepted: int
+    trades_proposed: int  # negotiations opened
+    trades_accepted: int  # negotiations that ended in a deal
+    counteroffers: int = 0
+    promises: int = 0
     agent_stats: list[dict | None] | None = None  # per seat, for agents that track stats
 
     def to_dict(self) -> dict:
@@ -59,7 +61,7 @@ def play_game(
     """
     s = new_game(len(agents), seed=seed, config=config, record=record)
     cfg = s.config
-    decisions = proposed = accepted = 0
+    decisions = proposed = accepted = countered = promised = 0
     last_round = s.round
     while s.phase != Phase.GAME_OVER:
         p = s.decision_player
@@ -78,6 +80,10 @@ def play_game(
             t = type(a)
             if t is ProposeTrade:
                 proposed += 1
+                promised += len(a.offer.promises)
+            elif t is CounterTrade:
+                countered += 1
+                promised += len(a.offer.promises)
             elif t is AcceptTrade:
                 accepted += 1
         apply(s, a)
@@ -97,6 +103,8 @@ def play_game(
         bankrupt_order=list(s.bankrupt_order),
         trades_proposed=proposed,
         trades_accepted=accepted,
+        counteroffers=countered,
+        promises=promised,
     )
     stats = [getattr(a, "stats", None) for a in agents]
     if any(st is not None for st in stats):

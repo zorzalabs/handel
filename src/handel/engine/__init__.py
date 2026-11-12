@@ -5,6 +5,7 @@ from .actions import (
     Action,
     Build,
     Buy,
+    CounterTrade,
     DeclineBuy,
     EndTurn,
     Mortgage,
@@ -36,7 +37,7 @@ from .rules import (
 from .state import BANK, GameConfig, GameState, Phase, Stage
 
 __all__ = [
-    "BANK", "BOARD", "GROUPS", "GROUP_MEMBERS", "AcceptTrade", "Action", "Build", "Buy",
+    "BANK", "BOARD", "GROUPS", "GROUP_MEMBERS", "AcceptTrade", "Action", "Build", "Buy", "CounterTrade",
     "DeclineBuy", "EndTurn", "GameConfig", "GameState", "IllegalAction", "Kind", "Mortgage",
     "PayJailFine", "Phase", "ProposeTrade", "RejectTrade", "RollForDoubles", "SellBuilding",
     "Space", "Stage", "TradeOffer", "Unmortgage", "UseJailCard", "advance", "apply",

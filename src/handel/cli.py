@@ -30,9 +30,11 @@ def main(argv: list[str] | None = None) -> None:
     rounds = sum(r["rounds"] for r in results) / n
     proposed = sum(r["trades_proposed"] for r in results) / n
     accepted = sum(r["trades_accepted"] for r in results) / n
+    countered = sum(r.get("counteroffers", 0) for r in results) / n
     print(f"{n} games in {dt:.1f}s ({n / dt:.0f} games/s)")
     print(f"avg rounds {rounds:.1f}; end reasons {dict(reasons)}")
-    print(f"trades per game: proposed {proposed:.2f}, accepted {accepted:.2f}")
+    print(f"trades per game: proposed {proposed:.2f}, accepted {accepted:.2f}, "
+          f"counteroffers {countered:.2f}")
     for seat, name in enumerate(names):
         print(f"  seat {seat} {name:<18} win rate {wins[seat] / n:6.1%}")
 

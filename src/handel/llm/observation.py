@@ -43,8 +43,13 @@ RULES
 - If you owe more than your cash, you must sell buildings and mortgage until you can pay;
   if even that is not enough you go bankrupt and are out.
 - Trades: on your turn, after moving, you may propose one trade to one opponent:
-  properties and/or cash in either direction, with a short message. Accepted trades are
-  binding and executed immediately. Anything said in a message is NOT binding.
+  properties and/or cash in either direction, with a short message and optional promises.
+  The other player may accept, reject, or make a counteroffer, which goes back to you; you
+  may then accept, reject or counter again. A negotiation allows at most {max_counters}
+  counteroffers in total; after that the player facing the latest offer must accept or
+  reject it. Accepted trades are binding and executed immediately. Messages and promises
+  (e.g. "I will not build on Polder for 5 rounds") are NOT binding: nothing enforces them.
+  Every player sees all trade messages and promises, so your reputation is public.
 - The game ends when one player is left, or after {max_rounds} rounds; then the highest net
   worth wins (cash + property prices, minus mortgage payoffs, + buildings at cost).
 - Your goal is to WIN: be the last player standing or have the highest net worth.
@@ -83,8 +88,8 @@ def board_reference() -> str:
     return "\n".join(lines)
 
 
-def system_prompt(max_rounds: int) -> str:
-    return RULES.format(max_rounds=max_rounds) + "\n\n" + board_reference()
+def system_prompt(max_rounds: int, max_counters: int = 3) -> str:
+    return RULES.format(max_rounds=max_rounds, max_counters=max_counters) + "\n\n" + board_reference()
 
 
 # --- Dynamic state ------------------------------------------------------------------
@@ -150,9 +155,51 @@ def describe_offer(o: TradeOffer, viewer: int | None = None) -> str:
             f"to {b} in exchange for {side(o.take_props, o.take_cash)}")
 
 
+def _who(p: int, viewer: int) -> str:
+    return "you" if p == viewer else pname(p)
+
+
+def offer_notes(o: TradeOffer, viewer: int) -> str:
+    """' Message: "..." Promises (not binding): "..."; "..."' (empty if neither)."""
+    out = ""
+    if o.message:
+        out += f' Message from {_who(o.proposer, viewer)}: "{o.message}"'
+    if o.promises:
+        out += " Promises (not binding): " + "; ".join(f'"{x}"' for x in o.promises)
+    return out
+
+
+def offer_effects(s: GameState, o: TradeOffer, viewer: int) -> str:
+    """Neutral facts about color sets and stations the offer would change, for both sides."""
+    facts: list[str] = []
+    for player in (o.proposer, o.responder):
+        if player == o.proposer:
+            lose, gain = set(o.give_props), set(o.take_props)
+        else:
+            lose, gain = set(o.take_props), set(o.give_props)
+        before = {q for q in range(len(s.owner)) if s.owner[q] == player}
+        after = (before - lose) | gain
+        who = _who(player, viewer)
+        for g in sorted({BOARD[q].group for q in lose | gain}):
+            members = GROUP_MEMBERS[g]
+            had = sum(1 for q in members if q in before)
+            has = sum(1 for q in members if q in after)
+            if g < STATION_GROUP:
+                if has == len(members) > had:
+                    facts.append(f"{who} would complete the {GROUPS[g].name} set and could build on it")
+                elif had == len(members) > has:
+                    facts.append(f"{who} would break up {'your' if who == 'you' else 'their'} "
+                                 f"complete {GROUPS[g].name} set")
+            elif g == STATION_GROUP and has != had:
+                facts.append(f"{who} would own {has} station{'s' if has != 1 else ''} "
+                             f"(rent {BOARD[members[0]].rents[has - 1] if has else 0} each)")
+    return "; ".join(facts) + "." if facts else "No color set is completed or broken up."
+
+
 def _offer_from_dict(d: dict) -> TradeOffer:
     return TradeOffer(d["proposer"], d["responder"], tuple(d["give_props"]),
-                      tuple(d["take_props"]), d["give_cash"], d["take_cash"], d.get("message", ""))
+                      tuple(d["take_props"]), d["give_cash"], d["take_cash"], d.get("message", ""),
+                      tuple(d.get("promises", ())))
 
 
 def format_event(e: dict, me: int) -> str | None:
@@ -160,11 +207,23 @@ def format_event(e: dict, me: int) -> str | None:
     ev = e["ev"]
     p = e.get("p")
     r = f"R{e['round'] + 1}"
-    if ev in ("trade_accepted", "trade_rejected"):  # the outcome line carries the whole offer
+    if ev in ("trade_proposed", "trade_countered"):  # each step only for the two parties
+        o = _offer_from_dict(e["offer"])
+        if me not in (o.proposer, o.responder):
+            return None
+        verb = "proposed" if ev == "trade_proposed" else "countered"
+        return f"{r} [trade #{e.get('tid', '?')}] {_who(p, me)} {verb}: {describe_offer(o, me)}.{offer_notes(o, me)}"
+    if ev in ("trade_accepted", "trade_rejected"):
         o = _offer_from_dict(e["offer"])
         verb = "ACCEPTED" if ev == "trade_accepted" else "rejected"
-        msg = f' Message from {pname(o.proposer)}: "{o.message}"' if o.message else ""
-        return f"{r} trade {verb}: {describe_offer(o, me)}.{msg}"
+        reply = f' Reply: "{e["message"]}"' if e.get("message") else ""
+        tid = e.get("tid", "?")
+        if me in (o.proposer, o.responder):  # the steps above already show the terms
+            return f"{r} [trade #{tid}] {_who(p, me)} {verb} the latest offer.{reply}"
+        n = e.get("counters", 0)
+        after = f" after {n} counteroffer{'s' if n != 1 else ''}" if n else ""
+        return (f"{r} [trade #{tid}] {pname(p)} {verb}{after}: {describe_offer(o, me)}."
+                f"{offer_notes(o, me)}{reply}")
     if ev == "bankrupt":
         return f"{r} {pname(p)} went bankrupt (to {pname(e['creditor'])})"
     if p != me and not (ev == "pay" and e.get("to") == me):
@@ -191,7 +250,7 @@ def format_event(e: dict, me: int) -> str | None:
     return None
 
 
-def history(s: GameState, me: int, own_events: int = 12, trades: int = 6) -> str:
+def history(s: GameState, me: int, own_events: int = 12, trades: int = 10) -> str:
     if not s.log:
         return ""
     own: list[str] = []
@@ -208,7 +267,7 @@ def history(s: GameState, me: int, own_events: int = 12, trades: int = 6) -> str
     if own:
         out.append("YOUR RECENT HISTORY\n" + "\n".join(f"- {x}" for x in own[-own_events:]))
     if public:
-        out.append("RECENT TRADES AND BANKRUPTCIES\n" + "\n".join(f"- {x}" for x in public[-trades:]))
+        out.append("RECENT NEGOTIATIONS AND BANKRUPTCIES\n" + "\n".join(f"- {x}" for x in public[-trades:]))
     return "\n".join(out)
 
 

@@ -27,7 +27,7 @@ class Phase(IntEnum):
     BUY = 1  # landed on an unowned property: buy or decline
     MANAGE = 2  # after moving: build, sell, mortgage, unmortgage, trade, end turn
     RAISE_FUNDS = 3  # a debtor must sell buildings / mortgage until the debt is covered
-    TRADE_RESPONSE = 4  # the trade responder must accept or reject
+    TRADE_RESPONSE = 4  # the trade responder must accept, reject or counter
     GAME_OVER = 5
     # AUCTION = 6  # reserved: auctions after a declined purchase are not implemented yet
 
@@ -53,6 +53,7 @@ class GameConfig:
     hotels: int = 12
     max_manage_actions: int = 50  # per turn; afterwards only EndTurn is legal
     max_trades_per_turn: int = 1
+    max_counters: int = 3  # counteroffers per negotiation, both sides together
     auctions: bool = False  # reserved for a later phase
 
 
@@ -105,8 +106,10 @@ class GameState:
     stored_roll: int = 0
     pending_buy: int = -1
     debts: list[Debt] = field(default_factory=list)
-    trade: TradeOffer | None = None
+    trade: TradeOffer | None = None  # the offer on the table (latest step of the negotiation)
     trades_this_turn: int = 0
+    trade_id: int = 0  # number of negotiations started so far; id of the current one
+    thread: list[TradeOffer] = field(default_factory=list)  # proposal + counters, oldest first
     manage_actions: int = 0
 
     winner: int = -1
@@ -132,6 +135,10 @@ class GameState:
         if ph == Phase.GAME_OVER:
             return -1
         return self.current
+
+    @property
+    def counters_used(self) -> int:
+        return max(0, len(self.thread) - 1)
 
     @property
     def is_over(self) -> bool:
@@ -167,6 +174,8 @@ class GameState:
             debts=[Debt(d.debtor, d.creditor, d.amount, d.reason) for d in self.debts],
             trade=self.trade,
             trades_this_turn=self.trades_this_turn,
+            trade_id=self.trade_id,
+            thread=list(self.thread),
             manage_actions=self.manage_actions,
             winner=self.winner,
             end_reason=self.end_reason,

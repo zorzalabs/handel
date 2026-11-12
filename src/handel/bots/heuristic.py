@@ -4,6 +4,12 @@ Trades are judged with a small valuation model (``holdings_value``): every
 property is worth its price, completing a color set adds a large bonus, and
 handing an opponent a completed set counts against you. The bot assumes its
 partner uses the same model when it sizes the cash part of an offer.
+
+Negotiation: an offer that falls short gets a counteroffer with the same
+properties and the cash set halfway through the range both sides would accept
+under the model; if that range is empty there is no deal and the bot rejects. After a
+rejection the bot waits a few rounds before proposing to that player again,
+longer each time.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from ..engine.actions import (
     Action,
     Build,
     Buy,
+    CounterTrade,
     DeclineBuy,
     ProposeTrade,
     TradeOffer,
@@ -43,6 +50,8 @@ NEAR_BONUS = 0.1  # one street short of a set
 STATION_BONUS = (0, 0, 40, 110, 220)
 UTILITY_BONUS = (0, 0, 40)
 OPPONENT_WEIGHT = 0.8  # how much an opponent's set bonus counts against me
+REBUFF_COOLDOWN = 3  # rounds to wait per consecutive rejection by the same player
+MAX_COOLDOWN = 15
 NUM_STREET_GROUPS = 8
 
 GROUP_PRICE = tuple(sum(BOARD[p].price for p in members) for members in GROUP_MEMBERS)
@@ -151,6 +160,9 @@ class HeuristicBot(Bot):
         self._buffer = float(base_buffer)
         self._proposed: dict[tuple, int] = {}  # offer key -> round proposed
         self._no_trade_sig: tuple | None = None
+        self._pending: tuple[int, int, tuple] | None = None  # (turn, partner, owners when proposed)
+        self._rebuffs: dict[int, int] = {}  # opponent -> consecutive rejections
+        self._cooldown: dict[int, int] = {}  # opponent -> first round I may propose again
 
     # --- helpers -----------------------------------------------------------------
 
@@ -209,22 +221,85 @@ class HeuristicBot(Bot):
                 return PAY_JAIL_FINE
         return ROLL_FOR_DOUBLES
 
-    def _respond(self, s: GameState, me: int, legal: list[Action]) -> Action:
-        if ACCEPT_TRADE not in legal or s.trade is None:
-            return REJECT_TRADE
-        o = s.trade
-        u = trade_utility(s, me, o, self.buffer(s, me))
+    @staticmethod
+    def _threshold(o: TradeOffer) -> float:
         moved = sum(BOARD[p].price for p in (*o.give_props, *o.take_props)) + o.give_cash + o.take_cash
-        return ACCEPT_TRADE if u > max(10.0, 0.05 * moved) else REJECT_TRADE
+        return max(10.0, 0.05 * moved)
+
+    def _respond(self, s: GameState, me: int, legal: list[Action]) -> Action:
+        o = s.trade
+        if o is None:
+            return REJECT_TRADE
+        buf = self.buffer(s, me)
+        if ACCEPT_TRADE in legal and trade_utility(s, me, o, buf) > self._threshold(o):
+            return ACCEPT_TRADE
+        if self.trade and s.counters_used < s.config.max_counters:
+            counter = self._counter(s, me, o, buf)
+            if counter is not None:
+                return CounterTrade(counter)
+        return REJECT_TRADE
+
+    def _counter(self, s: GameState, me: int, o: TradeOffer, buf: float) -> TradeOffer | None:
+        """Same properties, with the cash set halfway through the range both sides accept.
+
+        Under the valuation model my utility rises one-for-one with cash paid to me
+        and the partner's falls one-for-one, so the acceptable range is
+        [what I need, what still leaves the partner above its threshold]. If the
+        range is empty there is no deal to find and the bot rejects instead.
+        """
+        base = o.mirrored()  # me as proposer
+        other = base.responder
+        props_only = TradeOffer(me, other, base.give_props, base.take_props)
+        if not (props_only.give_props or props_only.take_props):
+            return None  # a pure cash transfer has nothing to bargain over
+        thr = self._threshold(base)
+        lo = thr - trade_utility(s, me, props_only, buf)  # min cash to me
+        hi = trade_utility(s, other, props_only) - thr  # max cash the partner should pay
+        if lo > hi:
+            return None
+        cash = int(round((lo + hi) / 2 / 10.0)) * 10
+        if cash < lo:
+            cash = int(-(-lo // 10)) * 10
+        if cash > hi:
+            return None
+        # Never ask for more than I already offered on these properties in this negotiation:
+        # walking back my own terms would make me look unreliable and stall the deal.
+        for prev in s.thread:
+            if (prev.proposer == me and set(prev.give_props) == set(base.give_props)
+                    and set(prev.take_props) == set(base.take_props)):
+                cash = min(cash, prev.take_cash - prev.give_cash)
+        offer = TradeOffer(me, other, base.give_props, base.take_props, max(-cash, 0), max(cash, 0))
+        if offer.key() == base.key() or trade_error(s, offer) is not None:
+            return None
+        if trade_utility(s, me, offer, buf) <= self._threshold(offer):
+            return None  # the cash buffer penalty makes it unreachable
+        return offer
+
+    def _note_outcome(self, s: GameState) -> None:
+        """After my proposal's negotiation ends, remember whether it was turned down."""
+        if self._pending is None or s.trade is not None:
+            return
+        turn, opp, owners = self._pending
+        self._pending = None
+        if turn != s.turn:
+            return
+        if tuple(s.owner) != owners:  # only a deal changes ownership during my turn
+            self._rebuffs[opp] = 0
+        else:
+            n = self._rebuffs.get(opp, 0) + 1
+            self._rebuffs[opp] = n
+            self._cooldown[opp] = s.round + min(MAX_COOLDOWN, REBUFF_COOLDOWN * n)
 
     def _manage(self, s: GameState, me: int, legal: list[Action]) -> Action:
         cash = s.players[me].cash
         buf = self.buffer(s, me)
 
+        self._note_outcome(s)
         if self.trade and s.trades_this_turn < s.config.max_trades_per_turn:
             offer = self._find_trade(s, me, buf)
             if offer is not None:
                 self._proposed[offer.key()] = s.round
+                self._pending = (s.turn, offer.responder, tuple(s.owner))
                 return ProposeTrade(offer)
 
         unmortgage = [a for a in legal if type(a) is Unmortgage]
@@ -273,7 +348,7 @@ class HeuristicBot(Bot):
             if len(holders) != 1:
                 continue
             opp = holders.pop()
-            if opp == BANK:
+            if opp == BANK or s.round < self._cooldown.get(opp, 0):
                 continue
             gives: list[tuple[int, ...]] = [()]
             for h in range(NUM_STREET_GROUPS):

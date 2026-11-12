@@ -129,13 +129,36 @@ def parse_jail(obj: dict) -> Action:
                          "roll": ROLL_FOR_DOUBLES})
 
 
-def parse_response(obj: dict) -> tuple[bool, str]:
+def _message(v: Any, limit: int = 500) -> str:
+    if v is None:
+        return ""
+    return (v if isinstance(v, str) else str(v)).strip()[:limit]
+
+
+def parse_promises(v: Any) -> tuple[str, ...]:
+    """A list of up to 3 short promise strings (a single string is accepted too)."""
+    if v is None or v == "" or v == []:
+        return ()
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise ReplyError('"promises" must be a list of short strings')
+    items = tuple(x.strip()[:200] for x in v if x.strip())
+    if len(items) > 3:
+        raise ReplyError("at most 3 promises per offer")
+    return items
+
+
+def parse_response(obj: dict, can_counter: bool = False) -> tuple[str, str]:
+    """``("accept" | "reject" | "counter", message)``; the counter body is parsed by the agent."""
     raw = obj.get("action")
     key = raw.strip().lower() if isinstance(raw, str) else None
-    if key not in ("accept", "reject"):
-        raise ReplyError('"action" must be "accept" or "reject"')
-    msg = obj.get("message", "")
-    return key == "accept", msg if isinstance(msg, str) else ""
+    allowed = ("accept", "reject", "counter") if can_counter else ("accept", "reject")
+    if key not in allowed:
+        if key == "counter":
+            raise ReplyError("no counteroffers are left in this negotiation; accept or reject")
+        raise ReplyError('"action" must be ' + " or ".join(f'"{a}"' for a in allowed))
+    return key, _message(obj.get("message"))
 
 
 _MANAGE_TYPES = {"build": Build, "sell_building": SellBuilding, "mortgage": Mortgage,
@@ -196,10 +219,8 @@ def parse_trade(raw: Any, me: int, num_players: int) -> TradeOffer | None:
         raise ReplyError('"give" and "receive" must be objects with "properties" and "cash"')
     gp, rp = _props(give.get("properties"), "give"), _props(recv.get("properties"), "receive")
     net = _cash(give.get("cash"), "give") - _cash(recv.get("cash"), "receive")
-    msg = raw.get("message", "")
-    if not isinstance(msg, str):
-        msg = str(msg)
-    return TradeOffer(me, to, gp, rp, max(net, 0), max(-net, 0), msg[:500])
+    return TradeOffer(me, to, gp, rp, max(net, 0), max(-net, 0), _message(raw.get("message")),
+                      parse_promises(raw.get("promises")))
 
 
 def describe_action(a: Action) -> str:
@@ -210,5 +231,5 @@ def describe_action(a: Action) -> str:
 
 __all__ = [
     "END_TURN", "ReplyError", "describe_action", "extract_json", "parse_action_list", "parse_buy",
-    "parse_jail", "parse_response", "parse_trade", "resolve_player", "resolve_property",
+    "parse_jail", "parse_promises", "parse_response", "parse_trade", "resolve_player", "resolve_property",
 ]

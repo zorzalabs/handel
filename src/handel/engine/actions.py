@@ -78,7 +78,8 @@ class TradeOffer:
     """A binding exchange between ``proposer`` and ``responder``.
 
     ``give_*`` flows from proposer to responder, ``take_*`` from responder to
-    proposer. ``message`` is free text (used by LLM agents; non-binding).
+    proposer. ``message`` is free text and ``promises`` are short statements of
+    intent (both used by LLM agents, visible to every player, never enforced).
     """
 
     proposer: int
@@ -88,6 +89,7 @@ class TradeOffer:
     give_cash: int = 0
     take_cash: int = 0
     message: str = ""
+    promises: tuple[str, ...] = ()
 
     def key(self) -> tuple:
         """Identity of the offer, ignoring the message."""
@@ -100,6 +102,11 @@ class TradeOffer:
             self.take_cash,
         )
 
+    def mirrored(self) -> TradeOffer:
+        """The same deal seen from the responder's side (as a counteroffer would state it)."""
+        return TradeOffer(self.responder, self.proposer, self.take_props, self.give_props,
+                          self.take_cash, self.give_cash)
+
     def to_dict(self) -> dict:
         return {
             "proposer": self.proposer,
@@ -109,6 +116,7 @@ class TradeOffer:
             "give_cash": self.give_cash,
             "take_cash": self.take_cash,
             "message": self.message,
+            "promises": list(self.promises),
         }
 
 
@@ -123,13 +131,27 @@ class ProposeTrade(Action):
 
 
 @dataclass(frozen=True, slots=True)
+class CounterTrade(Action):
+    """Answer an offer with a different one, sent back to its proposer.
+
+    Parametric like ``ProposeTrade``: never enumerated by ``legal_actions``.
+    Allowed while the negotiation has used fewer than ``max_counters`` counters.
+    """
+
+    offer: TradeOffer
+
+    def to_dict(self) -> dict:
+        return {"type": "CounterTrade", "offer": self.offer.to_dict()}
+
+
+@dataclass(frozen=True, slots=True)
 class AcceptTrade(Action):
-    pass
+    message: str = ""  # optional reply, shown to all players
 
 
 @dataclass(frozen=True, slots=True)
 class RejectTrade(Action):
-    pass
+    message: str = ""
 
 
 END_TURN = EndTurn()

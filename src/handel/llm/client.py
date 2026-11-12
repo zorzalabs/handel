@@ -221,4 +221,6 @@ class OptionPickerClient:
                 return {"actions": opts}
             k = min(len(opts), int(rng.random() * 3))
             return {"reasoning": "random", "actions": rng.sample(opts, k), "trade": None}
+        if kind == "respond":  # a counter needs terms the fake cannot invent; accept or reject
+            opts = [o for o in opts if o.get("action") != "counter"] or opts
         return {"reasoning": "random", **rng.choice(opts)} if opts else {}
