@@ -130,8 +130,12 @@ def request_params(llm: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
-def build_agents(cfg: RunConfig, seed: int, client: LLMClient | None = None) -> list:
-    """Create fresh agents for one game. ``client`` overrides the OpenRouter client."""
+def build_agents(cfg: RunConfig, seed: int, client: LLMClient | None = None,
+                 abort_on_api_error: bool = False) -> list:
+    """Create fresh agents for one game. ``client`` overrides the OpenRouter client.
+
+    ``abort_on_api_error`` ends the game when the API keeps failing instead of
+    letting LLM seats play the safe default (used by tournaments)."""
     agents = []
     shared: LLMClient | None = client
     for i, seat in enumerate(cfg.seats):
@@ -152,5 +156,6 @@ def build_agents(cfg: RunConfig, seed: int, client: LLMClient | None = None) -> 
             manage_policy=seat.llm["manage_policy"],
             history_events=seat.llm["history_events"],
             cache_system=cache_prompt_enabled(seat.model, seat.llm["cache_prompt"]),
+            abort_on_api_error=abort_on_api_error,
         ))
     return agents

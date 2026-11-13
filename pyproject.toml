@@ -14,6 +14,8 @@ handel-play = "handel.play:main"
 handel-value = "handel.fairvalue:main"
 handel-tournament = "handel.tournament:main"
 handel-analyze = "handel.analysis:main"
+handel-export = "handel.export:main"
+handel-gif = "handel.gif:main"
 
 [dependency-groups]
 analysis = [

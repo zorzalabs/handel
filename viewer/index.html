@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handel replay</title>
+<meta name="description" content="Replay viewer for Handel, a benchmark where LLM agents play an original property-trading game and negotiate trades.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Handel replay</h1>
+    <p class="sub" id="meta-line">Loading…</p>
+  </div>
+  <div class="loader">
+    <label class="visually-hidden" for="replay-select">Replay</label>
+    <select id="replay-select" aria-label="Choose a replay"></select>
+    <label class="btn ghost file">
+      Open file…
+      <input type="file" id="replay-file" accept=".json,application/json">
+    </label>
+    <button class="btn ghost icon" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">◐</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="board-wrap" aria-label="Board">
+    <div class="board" id="board">
+      <div class="center" id="center">
+        <div class="center-head">
+          <div class="round" id="round-label">Round 1</div>
+          <div class="dice" id="dice" aria-label="Last roll"></div>
+        </div>
+        <ol class="narration" id="narration" aria-live="polite"></ol>
+        <div class="on-table" id="on-table" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="side">
+    <section class="players" id="players" aria-label="Players"></section>
+
+    <section class="card chart-card" id="chart-card" hidden>
+      <div class="card-head">
+        <h2>Win probability</h2>
+        <span class="muted small" id="chart-note">Monte Carlo, bot rollouts</span>
+      </div>
+      <div class="chart" id="chart"></div>
+    </section>
+
+    <section class="card tabs-card">
+      <div class="tabs" role="tablist">
+        <button role="tab" class="tab" aria-selected="true" data-tab="neg" id="tab-neg">Negotiations</button>
+        <button role="tab" class="tab" aria-selected="false" data-tab="think" id="tab-think">Reasoning</button>
+        <button role="tab" class="tab" aria-selected="false" data-tab="log" id="tab-log">Events</button>
+      </div>
+      <div class="tab-body" id="panel-neg" role="tabpanel" aria-labelledby="tab-neg"></div>
+      <div class="tab-body" id="panel-think" role="tabpanel" aria-labelledby="tab-think" hidden></div>
+      <div class="tab-body" id="panel-log" role="tabpanel" aria-labelledby="tab-log" hidden></div>
+    </section>
+  </aside>
+</main>
+
+<footer class="controls" aria-label="Playback">
+  <div class="buttons">
+    <button class="btn icon" id="btn-prev-trade" type="button" title="Previous negotiation ([)" aria-label="Previous negotiation">⇤</button>
+    <button class="btn icon" id="btn-back" type="button" title="Step back (←)" aria-label="Step back">◀︎</button>
+    <button class="btn primary" id="btn-play" type="button" title="Play / pause (space)">Play</button>
+    <button class="btn icon" id="btn-fwd" type="button" title="Step forward (→)" aria-label="Step forward">▶︎</button>
+    <button class="btn icon" id="btn-next-trade" type="button" title="Next negotiation (])" aria-label="Next negotiation">⇥</button>
+  </div>
+  <div class="scrub">
+    <label class="visually-hidden" for="scrubber">Position in the game</label>
+    <input type="range" id="scrubber" min="0" max="0" value="0">
+    <div class="ticks" id="ticks" aria-hidden="true"></div>
+  </div>
+  <div class="speed">
+    <label for="speed" class="muted small">Speed</label>
+    <select id="speed">
+      <option value="2">slow</option>
+      <option value="5" selected>normal</option>
+      <option value="12">fast</option>
+      <option value="30">very fast</option>
+    </select>
+    <span class="muted small" id="frame-label"></span>
+  </div>
+</footer>
+<p class="footnote" id="footnote"></p>
+
+<div class="tooltip" id="tooltip" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

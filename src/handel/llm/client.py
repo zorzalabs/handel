@@ -51,6 +51,10 @@ class LLMError(RuntimeError):
     """The API call failed even after transport-level retries."""
 
 
+class LLMUnavailable(LLMError):
+    """The API kept failing (rate limits, outages) and the caller asked not to fall back."""
+
+
 class LLMFatalError(LLMError):
     """Authentication, billing or permission failure: no later call can succeed,
     so the game must stop instead of falling back on every decision."""
@@ -72,6 +76,7 @@ class OpenRouterClient:
         api_key: str | None = None,
         timeout_s: float = 90.0,
         max_retries: int = 4,
+        max_backoff_s: float = 30.0,
         pricing: dict[str, Price] | None = None,
         app_title: str = "handel-benchmark",
         transport: httpx.BaseTransport | None = None,
@@ -81,6 +86,7 @@ class OpenRouterClient:
         if not key:
             raise LLMFatalError("OPENROUTER_API_KEY is not set")
         self.max_retries = max_retries
+        self.max_backoff_s = max_backoff_s
         self.pricing = pricing or {}
         self._sleep = sleep
         self._http = httpx.Client(
@@ -96,9 +102,11 @@ class OpenRouterClient:
     def complete(self, model: str, messages: list[dict], **params: Any) -> Completion:
         body = {"model": model, "messages": messages, **params}
         last_err = ""
+        retry_after: float | None = None
         for attempt in range(self.max_retries + 1):
             if attempt:
-                self._sleep(min(30.0, 2.0**attempt) * (0.5 + random.random() / 2))
+                self._sleep(self._delay(attempt, retry_after))
+            retry_after = None
             t0 = time.perf_counter()
             try:
                 resp = self._http.post(OPENROUTER_URL, json=body)
@@ -108,6 +116,7 @@ class OpenRouterClient:
             latency = time.perf_counter() - t0
             if resp.status_code in RETRYABLE_STATUS:
                 last_err = f"HTTP {resp.status_code}: {resp.text[:300]}"
+                retry_after = _retry_after(resp)
                 continue
             if resp.status_code in FATAL_STATUS:
                 raise LLMFatalError(f"HTTP {resp.status_code}: {resp.text[:500]}")
@@ -123,6 +132,13 @@ class OpenRouterClient:
                 raise LLMError(last_err)
             return self._parse(data, model, latency)
         raise LLMError(f"gave up after {self.max_retries + 1} attempts; last error: {last_err}")
+
+    def _delay(self, attempt: int, retry_after: float | None) -> float:
+        """Exponential backoff with jitter; a server's Retry-After wins when it is longer."""
+        backoff = min(self.max_backoff_s, 2.0**attempt) * (0.5 + random.random() / 2)
+        if retry_after is not None:
+            return min(max(retry_after, backoff), 120.0)
+        return backoff
 
     def _parse(self, data: dict, model: str, latency: float) -> Completion:
         choice = (data.get("choices") or [{}])[0]
@@ -146,6 +162,16 @@ class OpenRouterClient:
             model=data.get("model", model),
             id=data.get("id", ""),
         )
+
+
+def _retry_after(resp: httpx.Response) -> float | None:
+    value = resp.headers.get("retry-after")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None  # HTTP-date form: fall back to our own backoff
 
 
 def message_text(message: dict) -> str:

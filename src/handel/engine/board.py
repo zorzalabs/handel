@@ -39,20 +39,22 @@ UTILITY_GROUP = 9
 class Group:
     id: int
     name: str
-    color: str  # hex, used by the replay viewer later
+    color: str  # hex, used by the replay viewer
 
 
+# An original palette (checked for colour-blind separation), deliberately not the
+# colour sequence of any published property-trading board.
 GROUPS: tuple[Group, ...] = (
-    Group(0, "Klei", "#8d6e63"),  # clay brown
-    Group(1, "Polder", "#81d4fa"),  # sky blue
-    Group(2, "Tulp", "#f06292"),  # tulip pink
-    Group(3, "Bursztyn", "#ffa726"),  # amber orange
-    Group(4, "Cegła", "#e53935"),  # brick red
-    Group(5, "Kaas", "#fdd835"),  # cheese yellow
-    Group(6, "Las", "#43a047"),  # forest green
-    Group(7, "Wisła", "#1e3a8a"),  # Vistula navy
-    Group(STATION_GROUP, "Stations", "#424242"),
-    Group(UTILITY_GROUP, "Utilities", "#9e9e9e"),
+    Group(0, "Klei", "#2a78d6"),
+    Group(1, "Polder", "#eb6834"),
+    Group(2, "Tulp", "#1baf7a"),
+    Group(3, "Bursztyn", "#eda100"),
+    Group(4, "Cegła", "#e87ba4"),
+    Group(5, "Kaas", "#008300"),
+    Group(6, "Las", "#6250d6"),
+    Group(7, "Wisła", "#e34948"),
+    Group(STATION_GROUP, "Stations", "#52514e"),
+    Group(UTILITY_GROUP, "Utilities", "#8a8984"),
 )
 
 

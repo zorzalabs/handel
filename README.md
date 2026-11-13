@@ -1,21 +1,82 @@
 # Handel
 
-A benchmark where LLM agents play an original property-trading board game against
-each other and against rule-based bots, with a focus on **how well they negotiate trades**.
+**A benchmark where LLM agents play an original property-trading board game against each
+other and against rule-based bots, built to measure how well they negotiate trades.**
 
-*Handel* means "trade" in both Polish and Dutch. The board is an original 40-space
-circuit of 11 Polish and 11 Dutch cities; prices, rents and cards are original and
-generated from simple formulas (see `src/handel/engine/board.py`). Currency: florins (fl).
+![A replayed game: Claude Opus, Sonnet and Haiku against a heuristic bot. Deals pause on the offer, the chat message and its Monte Carlo value.](docs/demo.gif)
 
-> Status: **Phase 1 (engine and bots)**, **Phase 2 (LLM agent interface)**,
-> **Phase 3 (negotiation)**, **Phase 4 (Monte Carlo fair value)**, **Phase 5 (tournament
-> runner)** and **Phase 6 (analysis)** are complete. The replay viewer comes next.
+*Handel* means "trade" in both Polish and Dutch. The board is an original 40-space circuit
+of 11 Polish and 11 Dutch cities. Prices, rents and cards are original, generated from
+simple formulas (`src/handel/engine/board.py`), and the currency is the florin (fl).
+
+## What it does
+
+* **A deterministic game engine.** It runs 10,000 bot games in under a minute, and every
+  game can be rebuilt exactly from its event log.
+* **LLM players through OpenRouter.** They see the board as text and answer each decision
+  in JSON. Illegal moves get one retry with the reason, and token use, cost and
+  illegal-move rate are tracked per seat.
+* **Real negotiation.** A trade is a proposal plus up to 3 counteroffers. Players attach
+  public messages and promises, and the promises are logged but never enforced.
+* **Monte Carlo fair value.** Every offer is priced by what it does to each player's
+  chance of winning. Paired bot rollouts give about ±1.5 points of error, and the tool
+  also gives the cash adjustment that would have made the deal fair.
+* **Tournaments.** Every seed is played in every seat rotation. A crashed or interrupted
+  game resumes from a prompt-hash reply cache at no extra cost, and a euro budget is
+  enforced across restarts.
+* **Analysis.** Win rates and head-to-head records come with confidence intervals
+  bootstrapped over seeds. Trade-quality metrics ask whether each player accepted good
+  offers and refused bad ones. There are charts and a notebook.
+* **A replay viewer.** It's a static web page: board, chat, the models' stated reasoning
+  and a win-probability chart, with offer values revealed as the game is played.
+
+## Watch a game
+
+```bash
+python3 -m http.server 8765 --directory viewer   # then open http://localhost:8765
+```
+
+The viewer ships with two real games between Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and
+the heuristic bot. The folder has no build step, so it can also be hosted as-is, for
+example on GitHub Pages.
+* **Controls:** space plays and pauses, the arrow keys step, and `[` / `]` jump between
+  negotiations.
+* **Chart:** clicking the win-probability chart jumps to that round.
+
+To add your own game:
+
+```bash
+uv run handel-export results/<run>/game_<seed>.json   # adds it to the viewer's menu
+uv run handel-gif viewer/replays/<file>.json --out docs/demo.gif
+```
+
+## What the games show so far
+
+Three real games on seed 1 are too few for model rankings (see Phase 6). Several
+behaviours still show up clearly, and they repeat:
+* **Haiku accepts set-completing swaps that complete the other side's set too.** The bot
+  offered Haarlem for Eindhoven plus 140 fl in two separate games, and Haiku accepted
+  both times ("Haarlem completes my Cegła set").
+  - By Monte Carlo, the deal cost Haiku 42 and then 65 points of win probability.
+  - In one of those games, Haiku's own counteroffer had been worth +18 to it.
+* **Sonnet blocks.** It refused every offer for Kielce, the street that completes Opus's
+  Polder set: 14 offers in one game and 10 in another. It refused even with almost no
+  cash left, and both times it went bankrupt first. Some of the refused offers would have
+  helped it.
+* **Opus haggles and escalates.** It makes most of the proposals (16 in one game) and
+  counters sensibly. In the tournament game it handled all 4 clearly good or bad offers
+  it faced correctly.
+* **The models barely use promises:** 4 in 42 negotiations, all from Opus.
+
+**Status:** Phases 1–7 are complete: engine and bots, LLM agents, negotiation, fair value,
+tournaments, analysis, and the replay viewer with this README. Each phase has its own
+section below.
 
 ## Setup
 
 ```bash
 uv sync
-uv run pytest                    # 274 tests, ~35 s (includes the 10k-game benchmark)
+uv run pytest                    # 285 tests, ~35 s (includes the 10k-game benchmark)
 uv run pytest -m "not slow"      # skip the benchmark
 uv run handel-sim --games 10000  # parallel bot simulation with a summary
 uv run handel-play configs/offline_demo.toml --games 3   # LLM pipeline, offline fake models
@@ -27,6 +88,7 @@ uv run handel-tournament configs/tournament_claude.toml  # 40 Claude games, ~EUR
 uv run handel-tournament configs/tournament_cheap.toml   # Sonnet + Haiku, 40 games, ~EUR 12
 uv sync --group analysis                                 # matplotlib + Jupyter for charts
 uv run handel-analyze results/tournament_cheap --value   # report, CIs, trade quality, charts
+uv run handel-export results/tournament_claude/records/seed1_rot0.json   # game -> viewer
 ```
 
 `.env` is git-ignored and read automatically; a key there overrides one exported in the
@@ -285,6 +347,16 @@ save_records = true # full records (transcripts, event log) in records/
   - Cached replies cost nothing new.
   - Overshoot is at most one call per running game.
   - Raise `budget_eur` (or pass `--budget-eur`) and re-run to continue.
+* **Rate limits.** With several games running at once, the provider sometimes answers
+  429 ("too many requests"). The tournament client waits these out: up to 8 retries,
+  respecting the server's `Retry-After` header.
+  - **The problem:** a game that kept failing used to let the LLM seat play the safe
+    default (decline, end turn, reject). That measured the API instead of the model. In
+    the first 4-game cheap run it affected 13% of Sonnet's decisions.
+  - **What happens now:** the game aborts instead. It goes to `errors.jsonl` and is
+    replayed from the cache on the next run.
+  - **Older games:** the standings warn about games that still contain such fallbacks,
+    and `--redo-api-errors` plays them again.
 * **Ctrl-C** lets running games finish their current call, then stops. A fatal API
   error (bad key, no credits) stops the whole run instead of being counted as a failed
   game.
@@ -413,6 +485,32 @@ it out: the table still holds two LLMs, so LLM-vs-LLM negotiation stays. To try 
   - Opus answered correctly every clear offer it faced (4 of 4).
   - Sonnet again refused every offer for Kielce, 10 in all.
 
+## Replay viewer and demo (Phase 7)
+
+* **`handel-export <record>`** replays the record through the engine, so every frame is a
+  verified state.
+  - It writes one frame per decision: board, cash, positions and readable event lines.
+  - It also attaches the negotiation threads, with messages, promises and, when a
+    `.value.json` sits next to the record, each offer's Monte Carlo value.
+  - It attaches the LLMs' stated reasoning, and adds the replay to
+    `viewer/replays/index.json`.
+* **`viewer/`** is a static page with no dependencies and no build step:
+  - the board, with original colour bands, numbered owner badges, buildings and tokens;
+  - player cards;
+  - a win-probability chart with hover and click-to-jump;
+  - tabs for negotiations, reasoning and events.
+* **No spoilers.** Offers, values and reasoning appear only once play reaches them.
+* **Layout.** It works in light and dark mode and at phone width, where cell names give
+  way to the badges and the narration.
+* **Original look.** The street-group colours are an original, colour-blind-checked
+  palette. They are deliberately not the colour sequence of any published board, and
+  players are identified by labelled "P#" badges, never colour alone.
+* **Reworded model text.** The models use a brand-like word for a complete colour set. In
+  model-written text the export shows it as "full set" and says how many uses were
+  changed; `--keep-wording` turns this off.
+* **`handel-gif <replay>`** renders the README animation with matplotlib. Frames are
+  sampled through the game, and every step of a deal is held long enough to read.
+
 ## Engine design
 
 ```
@@ -434,6 +532,10 @@ src/handel/
   analysis.py   CIs (seed bootstrap, Wilson), placements, head-to-head, negotiation and
                 trade-quality metrics, report + handel-analyze CLI
   charts.py     matplotlib charts for the report and notebook
+  export.py     record -> replay JSON for the web viewer + handel-export CLI
+  gif.py        replay -> animated GIF + handel-gif CLI
+viewer/         static replay viewer (index.html, app.js, style.css, replays/)
+notebooks/      analysis.ipynb
   runner.py     play_game (agent loop), continue_game (rollouts), simulate_many
   play.py       handel-play CLI: play configured games, save records
 ```

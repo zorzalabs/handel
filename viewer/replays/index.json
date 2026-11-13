@@ -1,0 +1,10 @@
+[
+ {
+  "file": "claude_tournament_seed1_rot0.json",
+  "title": "seed1_rot0: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 56 rounds)"
+ },
+ {
+  "file": "claude_phase3_seed1.json",
+  "title": "seed1: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 71 rounds)"
+ }
+]

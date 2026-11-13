@@ -238,3 +238,34 @@ def test_progress_callback_and_output(tmp_path, capsys):
     play.main([str(ROOT / "configs/offline_demo.toml"), "--out", str(tmp_path), "--seed", "2",
                "--progress", "0"])
     assert "round" not in capsys.readouterr().err
+
+
+def test_rate_limit_waits_for_retry_after():
+    waits = []
+    seen = []
+    queue = [httpx.Response(429, headers={"retry-after": "7"}, text="slow down"), _ok()]
+
+    def handler(request):
+        seen.append(request)
+        return queue.pop(0)
+
+    c = OpenRouterClient(api_key="k", transport=httpx.MockTransport(handler), sleep=waits.append)
+    assert c.complete("vendor/m", []).text == '{"action": "buy"}'
+    assert len(waits) == 1 and 7 <= waits[0] <= 120  # the server's Retry-After wins over short backoff
+
+
+def test_agent_can_abort_instead_of_falling_back():
+    from handel.bots import make_bot
+    from handel.llm import LLMError, LLMUnavailable
+    from handel.runner import play_game
+
+    class Down:
+        def complete(self, model, messages, **params):
+            raise LLMError("gave up after 9 attempts; last error: HTTP 429")
+
+    soft = LLMAgent(Down(), "x/y")
+    play_game([soft, make_bot("always_buy", 1)], seed=3, config=GameConfig(max_rounds=3))
+    assert soft.stats.fallbacks > 0  # default: safe moves stand in for the model
+    strict = LLMAgent(Down(), "x/y", abort_on_api_error=True)
+    with pytest.raises(LLMUnavailable, match="429"):
+        play_game([strict, make_bot("always_buy", 1)], seed=3, config=GameConfig(max_rounds=3))

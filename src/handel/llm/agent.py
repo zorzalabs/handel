@@ -51,7 +51,7 @@ from ..engine.actions import (
 from ..engine.board import BOARD, GROUP_MEMBERS, GROUPS, STATION_GROUP, UTILITY_GROUP
 from ..engine.rules import apply, legal_actions, owned, validate
 from ..engine.state import BANK, GameState, Phase
-from .client import Completion, LLMClient, LLMError, LLMFatalError
+from .client import Completion, LLMClient, LLMError, LLMFatalError, LLMUnavailable
 from .observation import (
     decision_prompt,
     describe_offer,
@@ -182,7 +182,12 @@ class LLMAgent:
         manage_policy: str = "opportunity",
         history_events: int = 12,
         cache_system: bool = False,
+        abort_on_api_error: bool = False,
     ) -> None:
+        """``abort_on_api_error``: when the API still fails after the client's
+        retries, raise :class:`LLMUnavailable` (ending the game) instead of playing
+        the safe default. Tournaments use it so that rate limits never stand in for
+        the model's own decisions."""
         if manage_policy not in ("opportunity", "always"):
             raise ValueError("manage_policy must be 'opportunity' or 'always'")
         self.client = client
@@ -192,6 +197,7 @@ class LLMAgent:
         self.manage_policy = manage_policy
         self.history_events = history_events
         self.cache_system = cache_system
+        self.abort_on_api_error = abort_on_api_error
         self.stats = AgentStats()
         self.transcript: list[dict] = []
         self._system: str | None = None
@@ -255,6 +261,8 @@ class LLMAgent:
             except LLMError as e:
                 st.api_errors += 1
                 entry["attempts"].append({"error": f"API: {e}"})
+                if self.abort_on_api_error:
+                    raise LLMUnavailable(f"{self.model}: {e}") from e
                 break
             st.add(comp)
             rec = {"reply": comp.text, "prompt_tokens": comp.prompt_tokens,

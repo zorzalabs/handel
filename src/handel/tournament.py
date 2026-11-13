@@ -220,7 +220,10 @@ class Tournament:
                 else:
                     timeout = max((s.llm.get("timeout_s", 90.0) for s in self.spec.run.seats
                                    if s.kind == "llm"), default=90.0)
-                    self._inner = OpenRouterClient(timeout_s=timeout, pricing=self.spec.run.pricing)
+                    # Patient retries: with several games in parallel, rate limits (429)
+                    # are routine and a game should wait them out, not fall back.
+                    self._inner = OpenRouterClient(timeout_s=timeout, pricing=self.spec.run.pricing,
+                                                   max_retries=8, max_backoff_s=60.0)
             return self._inner
 
     # -- one game --
@@ -229,7 +232,7 @@ class Tournament:
         spec = self.spec
         cfg = rotated_config(spec.run, g.lineup)
         caching = CachingClient(self._client(), store, budget) if cfg.needs_api else None
-        agents = build_agents(cfg, g.seed, client=caching)
+        agents = build_agents(cfg, g.seed, client=caching, abort_on_api_error=True)
         t0 = time.perf_counter()
         result, state = play_game(agents, seed=g.seed, config=cfg.game, record=True)
         elapsed = time.perf_counter() - t0
@@ -273,11 +276,13 @@ class Tournament:
                     f"(about EUR {per_game:.2f} each)")
         return None
 
-    def run(self, limit_games: int | None = None) -> RunOutcome:
+    def run(self, limit_games: int | None = None, redo_api_errors: bool = False) -> RunOutcome:
         self.out.mkdir(parents=True, exist_ok=True)
         games = schedule(self.spec)
         self._check_manifest(len(games))
         lines = self.results.read()
+        if redo_api_errors:
+            lines = self._set_aside_api_errors(lines)
         done = {x["game_id"] for x in lines}
         todo = [g for g in games if g.game_id not in done]
         if limit_games is not None:
@@ -350,6 +355,21 @@ class Tournament:
             store.close()
         return outcome
 
+    def _set_aside_api_errors(self, lines: list[dict]) -> list[dict]:
+        """Move games in which an LLM seat played fallbacks after API errors out of
+        games.jsonl (into games.superseded.jsonl) so they are played again."""
+        bad = [x for x in lines if api_error_count(x)]
+        if not bad:
+            return lines
+        keep = [x for x in lines if not api_error_count(x)]
+        old = JsonlFile(self.out / "games.superseded.jsonl")
+        for x in bad:
+            old.append(x)
+        _write_atomic(self.results.path, "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in keep))
+        self.echo(f"set aside {len(bad)} game(s) with API-error fallbacks; they will be played again "
+                  "(the reply cache covers them up to the first error)")
+        return keep
+
     def _progress(self, line: dict, n_done: int, n_total: int, budget: Budget, t0: float) -> str:
         cost = f"${line['cost_usd']:.2f}"
         if line["cache_hits"]:
@@ -358,6 +378,11 @@ class Tournament:
         return (f"  [{n_done}/{n_total}] {line['game_id']}: {line['winner']} won "
                 f"(seat {line['winner_seat']}, {line['rounds']} rounds) {cost} | "
                 f"spent EUR {budget.spent_eur():.2f}{lim} | {(time.perf_counter() - t0) / 60:.1f} min")
+
+
+def api_error_count(line: dict) -> int:
+    """API errors that LLM seats absorbed with fallbacks in a finished game."""
+    return sum((st or {}).get("api_errors", 0) for st in line.get("agent_stats") or [])
 
 
 # --- Standings ---------------------------------------------------------------------------
@@ -416,6 +441,10 @@ def format_standings(lines: list[dict], entrants: list[str], usd_to_eur: float) 
         out.append(f"  {r['entrant']:<22} {r['games']:>5} {r['wins']:>5} {r['win_rate']:>8.1%} "
                    f"{r['mean_net_worth']:>13.0f} {ill:>7} {r['fallbacks']:>9} "
                    f"${r['cost_usd']:>8.2f}  {by_seat}")
+    tainted = sum(1 for x in lines if api_error_count(x))
+    if tainted:
+        out.append(f"  WARNING: {tainted} game(s) include fallback moves caused by API errors; "
+                   "re-run with --redo-api-errors to replay them")
     nominal = sum(x["cost_usd"] for x in lines)
     fresh = sum(x.get("fresh_cost_usd", 0.0) for x in lines)
     line = f"  cost of these games: ${nominal:.2f} (EUR {nominal * usd_to_eur:.2f})"
@@ -437,6 +466,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-games", type=int, default=None, help="play at most N games this run")
     ap.add_argument("--summary", action="store_true", help="print standings only, play nothing")
     ap.add_argument("--force", action="store_true", help="allow a changed config in an existing --out")
+    ap.add_argument("--redo-api-errors", action="store_true",
+                    help="play again finished games where API errors forced fallback moves")
     args = ap.parse_args(argv)
 
     load_dotenv()
@@ -452,7 +483,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.summary:
         print(format_standings(tour.results.read(), spec.entrants, spec.run.usd_to_eur))
         return
-    outcome = tour.run(limit_games=args.max_games)
+    outcome = tour.run(limit_games=args.max_games, redo_api_errors=args.redo_api_errors)
     print(format_standings(outcome.lines, spec.entrants, spec.run.usd_to_eur))
     left = outcome.scheduled - len(outcome.lines)
     status = f"{len(outcome.lines)}/{outcome.scheduled} games finished"

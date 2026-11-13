@@ -242,3 +242,47 @@ def test_cli_runs_and_summarises(tmp_path, capsys):
     assert "4/4 games finished" in text and "heuristic" in text
     main([str(ROOT / "configs/tournament_offline.toml"), "--out", str(out), "--seeds", "1", "--summary"])
     assert "4 games" in capsys.readouterr().out
+
+
+class FlakyApi(HashPicker):
+    """Rate-limited from call ``down_from`` on (after the client's own retries)."""
+
+    def __init__(self, down_from, **kw):
+        super().__init__(**kw)
+        self.down_from = down_from
+
+    def complete(self, model, messages, **params):
+        from handel.llm import LLMError
+
+        if self.calls + 1 >= self.down_from:
+            self.calls += 1
+            raise LLMError("gave up after 9 attempts; last error: HTTP 429")
+        return super().complete(model, messages, **params)
+
+
+def test_api_outage_aborts_the_game_instead_of_playing_fallbacks(tmp_path):
+    t = _paid(tmp_path, "flaky", FlakyApi(down_from=12))
+    first = t.run()
+    assert first.played == 0 and first.failed == 1
+    err = JsonlFile(tmp_path / "flaky" / "errors.jsonl").read()[0]
+    assert "LLMUnavailable" in err["error"] and "429" in err["error"]
+    healthy = HashPicker()
+    second = _paid(tmp_path, "flaky", healthy).run()
+    assert second.played == 1 and second.lines[0]["cache_hits"] == 11
+    assert all(not (st or {}).get("api_errors") for st in second.lines[0]["agent_stats"])
+
+
+def test_redo_api_errors_replays_tainted_games(tmp_path):
+    from handel.tournament import api_error_count
+
+    t = _paid(tmp_path, "redo", HashPicker())
+    line = t.run().lines[0]
+    tainted = dict(line, agent_stats=[dict(st, api_errors=2) if st else st for st in line["agent_stats"]])
+    (tmp_path / "redo" / "games.jsonl").write_text(json.dumps(tainted) + "\n")
+    assert api_error_count(tainted) == 4
+    assert "WARNING" in format_standings([tainted], parse_tournament(raw_config(paid=True)).entrants, 1.0)
+    again = _paid(tmp_path, "redo", HashPicker()).run(redo_api_errors=True)
+    assert again.played == 1 and api_error_count(again.lines[0]) == 0
+    assert again.lines[0]["cache_hits"] > 0  # the whole game replays from the cache
+    assert len(JsonlFile(tmp_path / "redo" / "games.superseded.jsonl").read()) == 1
+    assert len(JsonlFile(tmp_path / "redo" / "games.jsonl").read()) == 1
