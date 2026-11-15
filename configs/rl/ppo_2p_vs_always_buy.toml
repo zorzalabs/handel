@@ -1,0 +1,49 @@
+# Curriculum step 2: 2 players, RL against always_buy.
+# Starts from the best weights of step 1 (the sanity run against random).
+#
+#   uv run handel-train configs/rl/ppo_2p_vs_always_buy.toml
+
+name = "ppo_2p_vs_always_buy"
+seed = 0
+total_steps = 6_000_000   # RL decisions
+init_from = "runs/ppo_2p_vs_random_s0/best.pt"
+
+[game]
+players = 2
+max_rounds = 150
+
+[opponents]
+pool = ["always_buy"]
+
+[model]
+hidden = [256, 256]
+end_turn_bias = 2.0       # only matters for a fresh network (ignored with init_from)
+
+[ppo]
+steps_per_update = 32768
+epochs = 4
+minibatch_size = 4096
+lr = 3e-4
+anneal_lr = true
+gamma = 1.0               # no discount: a discount per decision rewards stalling when behind
+gae_lambda = 0.99
+clip = 0.2
+vf_coef = 0.5
+ent_coef = 0.0            # an entropy bonus mostly bought more mortgage/unmortgage actions
+max_grad_norm = 0.5
+target_kl = 0.0
+
+[reward]
+win = 1.0
+shaping_coef = 0.0        # net worth shaping is off (Phase 13 tests it)
+shaping_decay = true
+
+[eval]
+every = 10                # updates between evaluations
+games = 200               # per lineup
+lineups = [["always_buy"], ["random"]]
+
+[run]
+workers = 0               # 0 = one rollout process per CPU core
+learner_threads = 4
+checkpoint_every = 25

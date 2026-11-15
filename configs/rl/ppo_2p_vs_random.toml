@@ -1,0 +1,49 @@
+# Curriculum step 1 (sanity run): 2 players, RL against the random bot.
+# This should learn within minutes. If it does not, there is a bug: check the
+# masks, where the reward is placed and the sign of the advantages before tuning.
+#
+#   uv run handel-train configs/rl/ppo_2p_vs_random.toml
+
+name = "ppo_2p_vs_random"
+seed = 0
+total_steps = 1_000_000   # RL decisions
+
+[game]
+players = 2
+max_rounds = 150
+
+[opponents]
+pool = ["random"]
+
+[model]
+hidden = [256, 256]
+end_turn_bias = 2.0       # a fresh network ends its turn more often than it mortgages at random
+
+[ppo]
+steps_per_update = 32768
+epochs = 4
+minibatch_size = 4096
+lr = 3e-4
+anneal_lr = true
+gamma = 1.0               # no discount: a discount per decision rewards stalling when behind
+gae_lambda = 0.99
+clip = 0.2
+vf_coef = 0.5
+ent_coef = 0.0            # an entropy bonus mostly bought more mortgage/unmortgage actions
+max_grad_norm = 0.5
+target_kl = 0.0
+
+[reward]
+win = 1.0
+shaping_coef = 0.0        # net worth shaping is off (Phase 13 tests it)
+shaping_decay = true
+
+[eval]
+every = 5                 # updates between evaluations
+games = 200               # per lineup
+lineups = [["random"], ["always_buy"]]
+
+[run]
+workers = 0               # 0 = one rollout process per CPU core
+learner_threads = 4
+checkpoint_every = 10

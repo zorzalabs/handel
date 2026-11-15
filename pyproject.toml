@@ -17,6 +17,7 @@ handel-analyze = "handel.analysis:main"
 handel-export = "handel.export:main"
 handel-gif = "handel.gif:main"
 handel-rl-eval = "handel.rl.evaluate:main"
+handel-train = "handel.rl.ppo:main"
 
 [dependency-groups]
 analysis = [

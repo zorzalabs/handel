@@ -1,0 +1,54 @@
+# Curriculum step 3: 4 players, RL plus 3 opponents drawn from the simple bots.
+# Starts from the best weights of step 2. The first eval lineup (3 always_buy)
+# is Target A and picks best.pt.
+#
+#   uv run handel-train configs/rl/ppo_4p_vs_bots.toml
+
+name = "ppo_4p_vs_bots"
+seed = 0
+total_steps = 9_000_000   # RL decisions; about 9 minutes on an Apple M1 with the evaluations
+init_from = "runs/ppo_2p_vs_always_buy_s0/best.pt"
+
+[game]
+players = 4
+max_rounds = 150
+
+[opponents]
+pool = ["random", "always_buy", "heuristic_notrade"]   # each opponent seat draws one, per game
+
+[model]
+hidden = [256, 256]
+end_turn_bias = 2.0       # only matters for a fresh network (ignored with init_from)
+
+[ppo]
+steps_per_update = 65536
+epochs = 4
+minibatch_size = 4096
+lr = 3e-4
+anneal_lr = true
+gamma = 1.0               # no discount: a discount per decision rewards stalling when behind
+gae_lambda = 0.99
+clip = 0.2
+vf_coef = 0.5
+ent_coef = 0.0            # an entropy bonus mostly bought more mortgage/unmortgage actions
+max_grad_norm = 0.5
+target_kl = 0.0
+
+[reward]
+win = 1.0
+shaping_coef = 0.0        # net worth shaping is off (Phase 13 tests it)
+shaping_decay = true
+
+[eval]
+every = 15                # updates between evaluations
+games = 400
+lineups = [
+    ["always_buy", "always_buy", "always_buy"],
+    ["heuristic_notrade", "heuristic_notrade", "heuristic_notrade"],
+    ["heuristic", "heuristic", "heuristic"],
+]
+
+[run]
+workers = 0               # 0 = one rollout process per CPU core
+learner_threads = 4
+checkpoint_every = 25

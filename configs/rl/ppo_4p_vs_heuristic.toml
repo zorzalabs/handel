@@ -1,0 +1,54 @@
+# Curriculum step 4: 4 players, RL against 3 heuristic bots (Target B).
+# The heuristic bots trade with each other; the RL agent's own trade answers
+# still come from the heuristic logic (it learns those in Phase 11).
+# Starts from the best weights of step 3.
+#
+#   uv run handel-train configs/rl/ppo_4p_vs_heuristic.toml
+
+name = "ppo_4p_vs_heuristic"
+seed = 0
+total_steps = 9_000_000   # RL decisions; about 9 minutes on an Apple M1 with the evaluations
+init_from = "runs/ppo_4p_vs_bots_s0/best.pt"
+
+[game]
+players = 4
+max_rounds = 150
+
+[opponents]
+pool = ["heuristic"]
+
+[model]
+hidden = [256, 256]
+end_turn_bias = 2.0       # only matters for a fresh network (ignored with init_from)
+
+[ppo]
+steps_per_update = 65536
+epochs = 4
+minibatch_size = 4096
+lr = 3e-4
+anneal_lr = true
+gamma = 1.0               # no discount: a discount per decision rewards stalling when behind
+gae_lambda = 0.99
+clip = 0.2
+vf_coef = 0.5
+ent_coef = 0.0            # an entropy bonus mostly bought more mortgage/unmortgage actions
+max_grad_norm = 0.5
+target_kl = 0.0
+
+[reward]
+win = 1.0
+shaping_coef = 0.0        # net worth shaping is off (Phase 13 tests it)
+shaping_decay = true
+
+[eval]
+every = 15                # updates between evaluations
+games = 400
+lineups = [
+    ["heuristic", "heuristic", "heuristic"],
+    ["always_buy", "always_buy", "always_buy"],
+]
+
+[run]
+workers = 0               # 0 = one rollout process per CPU core
+learner_threads = 4
+checkpoint_every = 25
