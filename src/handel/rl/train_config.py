@@ -32,6 +32,16 @@ Example (see ``configs/rl/``)::
     [run]
     workers = 8
 
+A ``[league]`` section with ``snapshot_every`` above 0 turns on self-play
+(Phase 10, see ``league.py``): the other seats are then filled by the current
+policy, by older snapshots of it and by bots from ``[opponents] pool``::
+
+    [league]
+    snapshot_every = 25         # updates between snapshots (0 = no league)
+    current = 0.4               # share of the other seats: the current policy
+    snapshots = 0.4             # ... a past snapshot
+    bots = 0.2                  # ... a bot from [opponents] pool
+
 Every key is optional except ``name``. Unknown keys are an error, so a typo
 cannot silently fall back to a default. The resolved config is saved as
 ``config.json`` in the run folder and a resumed run reads it from there.
@@ -41,6 +51,7 @@ Game seeds (so that no evaluation game is ever a training game):
 * ``handel-rl-eval`` uses seeds from ``--seed`` (0 by default) upwards
 * the learning curve evaluation inside training uses ``CURVE_SEED_BASE`` upwards,
   the same games every time
+* the rating games of a league run use ``RATING_SEED_BASE`` upwards
 * training game ``g`` of a run uses ``(run seed + 1) * TRAIN_SEED_BASE + g``
 """
 
@@ -53,13 +64,15 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from ..bots import BOTS
 from ..engine.state import GameConfig
 from .observation import MAX_PLAYERS
+from .opponents import OPPONENTS
 from .rollout import RL, GameSpec
 
 CURVE_SEED_BASE = 500_000_000
+RATING_SEED_BASE = 700_000_000
 TRAIN_SEED_BASE = 1_000_000_000
+MAX_RATING_GAMES = 10_000  # per rating round, so that rounds never share a game seed
 
 
 @dataclass(frozen=True)
@@ -93,6 +106,24 @@ class EvalConfig:
 
 
 @dataclass(frozen=True)
+class LeagueConfig:
+    """Self-play against the current policy and its past snapshots (off by default)."""
+
+    snapshot_every: int = 0  # updates between snapshots; 0 = no league, opponents are bots only
+    current: float = 0.4  # share of the other seats played by the current policy (they learn too)
+    snapshots: float = 0.4  # share played by a past snapshot
+    bots: float = 0.2  # share played by a bot drawn from [opponents] pool
+    recent_count: int = 8  # "recent" means the newest this many snapshots
+    recent_share: float = 0.5  # of the snapshot seats: drawn from the recent ones; the rest from all
+    rating_games: int = 200  # games per rating round, one round per snapshot (0 = no ratings)
+    rating_k: float = 32.0  # Elo K for a new player; it falls with the number of rated games
+
+    @property
+    def enabled(self) -> bool:
+        return self.snapshot_every > 0
+
+
+@dataclass(frozen=True)
 class TrainConfig:
     name: str
     seed: int = 0
@@ -106,9 +137,11 @@ class TrainConfig:
     ppo: PPOConfig = field(default_factory=PPOConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    league: LeagueConfig = field(default_factory=LeagueConfig)
     workers: int = 0  # rollout processes; 0 = one per CPU core
     learner_threads: int = 4  # torch threads for the PPO update
     checkpoint_every: int = 25  # updates between numbered checkpoints (0 = only latest and best)
+    entropy_warn: float = 0.0  # warn when the policy entropy (nats) falls below this (0 = never)
 
     @property
     def run_id(self) -> str:
@@ -126,9 +159,9 @@ class TrainConfig:
         if not self.opponents:
             raise ValueError("opponents.pool is empty")
         names = set(self.opponents) | {n for lu in self.eval.lineups for n in lu}
-        unknown = sorted(names - set(BOTS))
+        unknown = sorted(names - set(OPPONENTS))
         if unknown:
-            raise ValueError(f"unknown bot(s) {unknown}; choose from {sorted(BOTS)}")
+            raise ValueError(f"unknown bot(s) {unknown}; choose from {sorted(OPPONENTS)}")
         for lu in self.eval.lineups:
             if not 1 <= len(lu) <= MAX_PLAYERS - 1:
                 raise ValueError(f"eval lineup {list(lu)} needs 1 to {MAX_PLAYERS - 1} opponents")
@@ -140,14 +173,25 @@ class TrainConfig:
             raise ValueError("ppo.gamma must be in (0, 1] and ppo.gae_lambda in [0, 1]")
         if self.seed < 0:
             raise ValueError("seed must not be negative")
+        lg = self.league
+        if lg.enabled:
+            shares = (lg.current, lg.snapshots, lg.bots)
+            if min(shares) < 0 or abs(sum(shares) - 1) > 1e-6:
+                raise ValueError(f"league.current, league.snapshots and league.bots must be 0 or more "
+                                 f"and add up to 1, got {shares}")
+            if lg.recent_count < 1 or not 0 <= lg.recent_share <= 1:
+                raise ValueError("league.recent_count must be at least 1 and league.recent_share in [0, 1]")
+            if not 0 <= lg.rating_games <= MAX_RATING_GAMES:
+                raise ValueError(f"league.rating_games must be 0 to {MAX_RATING_GAMES}")
 
 
 # TOML layout: section -> (dataclass, or None for keys that live on TrainConfig itself).
-_SECTIONS: dict[str, Any] = {"ppo": PPOConfig, "reward": RewardConfig, "eval": EvalConfig}
+_SECTIONS: dict[str, Any] = {"ppo": PPOConfig, "reward": RewardConfig, "eval": EvalConfig,
+                             "league": LeagueConfig}
 _FLAT: dict[str, tuple[str, ...]] = {
     "game": ("players", "max_rounds"),
     "model": ("hidden", "end_turn_bias"),
-    "run": ("workers", "learner_threads", "checkpoint_every"),
+    "run": ("workers", "learner_threads", "checkpoint_every", "entropy_warn"),
 }
 _TOP = ("name", "seed", "total_steps", "init_from")
 
@@ -213,10 +257,13 @@ def load_config(path: str | Path, overrides: list[str] | None = None) -> TrainCo
 
 
 def from_dict(d: dict[str, Any]) -> TrainConfig:
-    """Inverse of ``TrainConfig.to_dict`` (the ``config.json`` of a run)."""
+    """Inverse of ``TrainConfig.to_dict`` (the ``config.json`` of a run).
+
+    Keys that an older run's file does not have yet keep their defaults.
+    """
     kw = {k: _tuples(v) for k, v in d.items()}
     for section, cls in _SECTIONS.items():
-        kw[section] = cls(**{k: _tuples(v) for k, v in d[section].items()})
+        kw[section] = cls(**{k: _tuples(v) for k, v in d.get(section, {}).items()})
     cfg = TrainConfig(**kw)
     cfg.validate()
     return cfg

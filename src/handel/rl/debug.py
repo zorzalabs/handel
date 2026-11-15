@@ -19,7 +19,6 @@ from collections.abc import Callable
 
 import numpy as np
 
-from ..bots import BOTS, make_bot
 from ..bots.base import Agent
 from ..engine.actions import Action
 from ..engine.board import BOARD
@@ -28,6 +27,7 @@ from ..runner import GameResult, bot_seed, play_game
 from .actions import BUY, DECLINE_BUY, describe, from_index
 from .agent import RLAgent, Step
 from .evaluate import load_policy, schedule
+from .opponents import OPPONENTS, make_opponent
 from .policy import NumpyPolicy
 from .ppo import terminal_reward
 from .rollout import GameRollout, RolloutPool
@@ -94,7 +94,7 @@ def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: i
         if i == seat:
             agents.append(TracingAgent(policy, on_decision, bot_seed(seed, i), deterministic))
         else:
-            agents.append(make_bot(names.pop(0), bot_seed(seed, i)))
+            agents.append(make_opponent(names.pop(0), bot_seed(seed, i)))
     result, _ = play_game(agents, seed=seed, config=config)
     if limit is not None and shown > limit:
         out(f"... {shown - limit} more decisions not shown")
@@ -197,8 +197,8 @@ def main(argv: list[str] | None = None) -> None:
 
     opponents = [x.strip() for x in args.opponents.split(",") if x.strip()]
     for name in opponents:
-        if name not in BOTS:
-            ap.error(f"unknown bot {name!r}; choose from {sorted(BOTS)}")
+        if name not in OPPONENTS:
+            ap.error(f"unknown bot {name!r}; choose from {sorted(OPPONENTS)}")
     if not 1 <= len(opponents) <= 3:
         ap.error("give 1 to 3 opponents")
     net, _ = load_policy(args.policy, args.seed)

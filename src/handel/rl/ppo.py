@@ -33,6 +33,14 @@ Run folder ``runs/<run id>/``::
     ckpt_000025.pt      numbered checkpoints every ``checkpoint_every`` updates
     learning_curve.png  redrawn after every evaluation
 
+A league run (``[league]`` in the config, see ``league.py``) plays against the
+current policy and its older snapshots as well as bots, and also writes::
+
+    snapshots/          one frozen copy of the policy per ``snapshot_every`` updates
+    elo.csv             Elo ratings after every rating round (one round per snapshot)
+    elo.png             redrawn after every evaluation
+    warnings.csv        entropy and self-play warnings (also printed)
+
 Every checkpoint works with ``handel-rl-eval``. Same seed and same config give
 the same weights on the same machine, with any number of workers, and a
 resumed run continues exactly as if it had never stopped.
@@ -58,6 +66,7 @@ import torch
 from torch import nn
 
 from .evaluate import schedule, summarize
+from .league import League
 from .policy import (
     PolicyConfig,
     PolicyNet,
@@ -67,6 +76,7 @@ from .policy import (
     read_checkpoint,
     save_checkpoint,
 )
+from .ratings import self_play_warning
 from .rollout import GameRollout, RolloutPool
 from .train_config import (
     CURVE_SEED_BASE,
@@ -81,6 +91,7 @@ from .train_config import (
 
 FIRST_GUESS_STEPS_PER_GAME = 200.0  # only used to size the very first batch
 MIN_GAMES_PER_UPDATE = 8
+ENTROPY_WARN_EVERY = 50  # while the entropy stays low, repeat the warning every this many updates
 
 
 # --- Rewards and advantages -------------------------------------------------------------
@@ -132,7 +143,7 @@ class Batch:
     values: np.ndarray  # (N,) float32, value estimate when the action was taken
     advantages: np.ndarray  # (N,) float32
     returns: np.ndarray  # (N,) float32
-    games: int  # RL seats played (one per game in Phase 9)
+    games: int  # RL seats played (one per game; more when the current policy fills other seats too)
     wins: int
     reward_sum: float  # sum of all rewards (terminal + shaping)
 
@@ -257,6 +268,7 @@ class TrainState:
     wall_s: float = 0.0
     best_win_rate: float = -1.0  # against the first eval lineup
     best_update: int = -1
+    low_entropy_updates: int = 0  # updates in a row with the entropy below ``entropy_warn``
 
 
 def git_commit() -> str | None:
@@ -343,7 +355,9 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
     run_id = run_dir.name
     latest, best = run_dir / "latest.pt", run_dir / "best.pt"
     train_csv, eval_csv = run_dir / "train.csv", run_dir / "eval.csv"
+    elo_csv, warn_csv = run_dir / "elo.csv", run_dir / "warnings.csv"
     commit = git_commit()
+    league = League(cfg, run_dir) if cfg.league.enabled else None
 
     # Seeds. Nothing below draws from the global generators (games are seeded per game,
     # minibatches per update), but set them anyway so stray randomness is repeatable.
@@ -359,8 +373,10 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
         optimizer = torch.optim.Adam(net.parameters(), lr=cfg.ppo.lr, eps=1e-5)
         optimizer.load_state_dict(ck["optimizer"])
         state = TrainState(**ck["train_state"])
-        trim_rows(train_csv, state.update)
-        trim_rows(eval_csv, state.update)
+        for path in (train_csv, eval_csv, elo_csv, warn_csv):
+            trim_rows(path, state.update)
+        if league:
+            league.restore(ck["league"], state.update)
         echo(f"resuming {run_id} at update {state.update} ({_fmt_steps(state.steps)} steps)")
     else:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -377,8 +393,29 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
             "git_commit": commit, "machine": platform.processor() or platform.machine(),
             "cpus": os.cpu_count(), "torch": torch.__version__}, indent=1), encoding="utf-8")
 
+    def warn(kind: str, message: str) -> None:
+        append_row(warn_csv, {"update": state.update, "steps": state.steps, "kind": kind, "message": message})
+        echo(f"    WARNING ({kind}): {message}")
+
+    def take_snapshot() -> None:
+        """Freeze the current weights as a snapshot and let it play its rating round."""
+        league.add_snapshot(net, state.update, _meta(cfg, run_id, state, commit))
+        if not cfg.league.rating_games:
+            return
+        rows = league.rate(pool, net, state.update, state.steps)
+        for row in rows:
+            append_row(elo_csv, row)
+        me = rows[0]
+        vs = ", ".join(f"{k.replace('ahead_of_', '')} {me[k]:.0%}" for k in ("ahead_of_snapshots", "ahead_of_bots")
+                       if me[k] != "")
+        echo(f"    snapshot {state.update}: Elo {me['rating']:.0f} (finished ahead of: {vs}); "
+             + ", ".join(f"{r['player']} {r['rating']:.0f}" for r in rows if r["kind"] == "bot"))
+
     def run_evaluation() -> None:
         rows = evaluate(pool, net, cfg, state)
+        if league:  # the Elo of the newest snapshot, so both measures sit in one file
+            elo = league.current_rating()
+            rows = [{**row, "elo": "" if elo is None else round(elo, 1)} for row in rows]
         for row in rows:
             append_row(eval_csv, row)
             echo(f"    eval vs {row['opponents']}: {row['win_rate']:.1%} of {row['games']} games "
@@ -387,19 +424,32 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
         if rows[0]["win_rate"] >= state.best_win_rate:  # ">=": prefer the later of two equal ones
             state.best_win_rate, state.best_update = rows[0]["win_rate"], state.update
             save_checkpoint(net, best, _meta(cfg, run_id, state, commit))
+        if league:
+            # Guard rail: Elo up while the fixed benchmark (the first lineup) goes down.
+            history = [r for r in read_rows(eval_csv)
+                       if r["opponents"] == rows[0]["opponents"] and r["elo"] != ""]
+            message = self_play_warning([float(r["win_rate"]) for r in history],
+                                        [float(r["elo"]) for r in history])
+            if message:
+                warn("self_play", message)
         _draw_curve(run_dir, echo)
 
     def save_latest() -> None:
-        save_checkpoint(net, latest, _meta(cfg, run_id, state, commit),
-                        extra={"optimizer": optimizer.state_dict(), "train_state": asdict(state)})
+        extra = {"optimizer": optimizer.state_dict(), "train_state": asdict(state)}
+        if league:
+            extra["league"] = league.state()
+        save_checkpoint(net, latest, _meta(cfg, run_id, state, commit), extra=extra)
 
     started = time.perf_counter()
     wall_before = state.wall_s
     updates_here = 0
     stopped_early = False
     with RolloutPool(cfg.workers or None) as pool:
+        if not resume and league:
+            take_snapshot()  # snapshot 0: the starting weights
         if not resume and cfg.eval.every:
             run_evaluation()  # the starting point of the learning curve
+        if not resume and (league or cfg.eval.every):
             save_latest()
         while state.steps < cfg.total_steps:
             if max_updates is not None and updates_here >= max_updates:
@@ -416,7 +466,11 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
             #    length of the games in the last batch), so short games are not over-sampled.
             t0 = time.perf_counter()
             n_games = max(MIN_GAMES_PER_UPDATE, math.ceil(cfg.ppo.steps_per_update / state.steps_per_game))
-            rollouts = pool.collect(net, training_specs(cfg, state.games, n_games), cfg.game_config())
+            if league:
+                specs = league.specs(state.games, n_games)
+                rollouts = pool.collect(net, specs, cfg.game_config(), snapshot_dir=str(league.dir))
+            else:
+                rollouts = pool.collect(net, training_specs(cfg, state.games, n_games), cfg.game_config())
             # 2. and 3. Rewards and GAE.
             batch = build_batch(rollouts, cfg, shaping)
             t1 = time.perf_counter()
@@ -445,6 +499,8 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
                 "collect_s": round(t1 - t0, 2), "learn_s": round(t2 - t1, 2),
                 "steps_per_s": round(len(batch) / (t2 - t0)),
             }
+            if league:  # how many seats per game the current policy played (the learner plus self-play)
+                row["rl_seats_per_game"] = round(batch.games / n_games, 3)
             append_row(train_csv, row)
             eta = (cfg.total_steps - state.steps) / max(row["steps_per_s"], 1)
             echo(f"upd {state.update:4d} | {_fmt_steps(state.steps):>6}/{_fmt_steps(cfg.total_steps)} steps"
@@ -453,7 +509,17 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
                  f" | kl {stats['approx_kl']:.4f} | clip {stats['clip_frac']:.2f}"
                  f" | ev {stats['explained_var']:+.2f} | {row['steps_per_s'] / 1e3:.1f}k steps/s"
                  f" | left {_fmt_time(max(eta, 0))}")
+            # Guard rail: a policy that is nearly deterministic has stopped exploring.
+            if cfg.entropy_warn and stats["entropy"] < cfg.entropy_warn:
+                state.low_entropy_updates += 1
+                if state.low_entropy_updates % ENTROPY_WARN_EVERY == 1:
+                    warn("entropy", f"policy entropy {stats['entropy']:.3f} nats is below {cfg.entropy_warn} "
+                         f"after {state.steps / cfg.total_steps:.0%} of the run; the agent has almost stopped exploring")
+            else:
+                state.low_entropy_updates = 0
             done = state.steps >= cfg.total_steps
+            if league and league.due(state.update):
+                take_snapshot()
             if cfg.eval.every and (state.update % cfg.eval.every == 0 or done):
                 run_evaluation()
             if cfg.checkpoint_every and state.update % cfg.checkpoint_every == 0:
@@ -477,15 +543,17 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
 
 
 def _draw_curve(run_dir: Path, echo) -> None:
-    """Redraw learning_curve.png; training goes on without it if matplotlib is not installed."""
+    """Redraw learning_curve.png (and elo.png in a league run); training goes on without
+    them if matplotlib is not installed."""
     try:
-        from .curves import learning_curve
+        from .curves import elo_chart, learning_curve
     except ImportError:
         return
     try:
         learning_curve(run_dir)
+        elo_chart(run_dir)
     except Exception as e:  # a chart problem must never stop a training run
-        echo(f"    (could not draw the learning curve: {e})")
+        echo(f"    (could not draw the charts: {e})")
 
 
 def _finish_run_json(run_dir: Path, state: TrainState, finished: bool) -> None:
@@ -537,11 +605,16 @@ def main(argv: list[str] | None = None) -> None:
         if (run_dir / "latest.pt").exists():
             ap.error(f"{run_dir} already holds a run. Continue it with --resume {run_dir}, "
                      "or pick another --run-id or --seed")
-    print(f"run {run_dir.name}: {cfg.players} players, opponents from {list(cfg.opponents)}, "
+    lg = cfg.league
+    mix = (f"league ({lg.current:.0%} current policy, {lg.snapshots:.0%} snapshots, {lg.bots:.0%} bots "
+           f"from {list(cfg.opponents)})" if lg.enabled else f"opponents from {list(cfg.opponents)}")
+    print(f"run {run_dir.name}: {cfg.players} players, {mix}, "
           f"{_fmt_steps(cfg.total_steps)} steps, seed {cfg.seed}")
     limit = None if args.max_minutes is None else args.max_minutes * 60
     try:
-        train(cfg, run_dir, resume=bool(args.resume), max_updates=args.max_updates, max_seconds=limit)
+        # flush: progress shows up at once, also when the output goes to a file or through tee
+        train(cfg, run_dir, resume=bool(args.resume), max_updates=args.max_updates, max_seconds=limit,
+              echo=lambda line: print(line, flush=True))
     except KeyboardInterrupt:
         print(f"\ninterrupted. Continue with: uv run handel-train --resume {run_dir}")
 

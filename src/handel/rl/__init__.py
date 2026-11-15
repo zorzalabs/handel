@@ -14,4 +14,9 @@ Modules (import them directly; this package imports nothing so that
 * ``ppo``: ``handel-train``, PPO from scratch with logging, checkpoints and resume
 * ``curves``: learning curve and diagnostics charts from a run's CSV logs
 * ``debug``: print one game decision by decision; check the value head
+* ``league``: self-play (Phase 10): snapshots of the policy and the opponent mix
+* ``snapshots``: saving snapshots and loading them in the rollout workers
+* ``ratings``: Elo ratings for snapshots and bots; the self-play warning
+* ``exploiters``, ``opponents``: bots with one odd habit, and all opponents by name
+* ``probe``: play a policy against the exploiter bots
 """

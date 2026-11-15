@@ -6,6 +6,8 @@
   training steps, with 95% intervals, plus the win rate in the training games.
 * ``diagnostics``: steps per game, entropy, explained variance and approximate
   KL per update, one small panel each.
+* ``elo_chart`` (league runs only, from ``elo.csv``): Elo rating over training
+  steps for the current policy, the top-rated snapshot and the fixed bots.
 
 Same look as ``handel/charts.py``. Needs matplotlib (the ``analysis`` group).
 """
@@ -136,15 +138,73 @@ def diagnostics(run_dir: str | Path, out: str | Path | None = None) -> Path | No
     return path
 
 
+def elo_chart(run_dir: str | Path, out: str | Path | None = None) -> Path | None:
+    """Elo over training steps (league runs). Returns the PNG path, or None without ``elo.csv``."""
+    run_dir = Path(run_dir)
+    rows = _rows(run_dir / "elo.csv")
+    if not rows:
+        return None
+    fig, ax = plt.subplots(figsize=(8, 4.2), dpi=150)
+    last_x = max(float(r["steps"]) for r in rows)
+
+    def series(kind: str, player: str | None = None) -> tuple[list[float], list[float]]:
+        sel = [r for r in rows if r["kind"] == kind and (player is None or r["player"] == player)]
+        return [float(r["steps"]) for r in sel], [float(r["rating"]) for r in sel]
+
+    ends: list[tuple[float, str]] = []
+    bots = list(dict.fromkeys(r["player"] for r in rows if r["kind"] == "bot"))
+    for i, bot in enumerate(bots):  # thin lines: the fixed reference points
+        xs, ys = series("bot", bot)
+        ax.plot(xs, ys, color=SERIES[(i + 2) % len(SERIES)], linewidth=1.2, label=bot)
+        ends.append((ys[-1], bot))
+    xs, ys = series("best")
+    ax.plot(xs, ys, color=SERIES[1], linewidth=1.5, label="top-rated snapshot at that time")
+    ends.append((ys[-1], "top snapshot"))
+    xs, ys = series("current")
+    ax.plot(xs, ys, color=SERIES[0], linewidth=2, solid_joinstyle="round", solid_capstyle="round",
+            label="current policy (its newest snapshot)")
+    ax.scatter([xs[-1]], [ys[-1]], s=50, color=SERIES[0], edgecolor=SURFACE, linewidth=2, zorder=3)
+    ends.append((ys[-1], "current policy"))
+
+    # Direct labels at the line ends; lines that end close together share one label.
+    lo, hi = ax.get_ylim()
+    gap = (hi - lo) * 0.07
+    groups: list[tuple[float, list[str]]] = []
+    for v, name in sorted(ends, reverse=True):
+        if groups and groups[-1][0] - v < gap:
+            groups[-1][1].append(f"{name}  {v:.0f}")
+        else:
+            groups.append((v, [f"{name}  {v:.0f}"]))
+    for v, names in groups:
+        ax.text(last_x * 1.02 if last_x else 0.02, v, "\n".join(names), fontsize=8, color=TEXT_2, va="center")
+
+    ax.set_xlim(0, last_x * 1.42 if last_x else 1)
+    ax.set_xticks([t for t in ax.get_xticks() if 0 <= t <= last_x])
+    ax.grid(axis="y", color=GRID, linewidth=1)
+    _steps_axis(ax)
+    ax.legend(loc="upper left", bbox_to_anchor=(0, -0.16), ncol=2, frameon=False, fontsize=8,
+              labelcolor=TEXT_2)
+    _style(ax, f"Elo ratings of {run_dir.name}",
+           "rating after each snapshot's rating round; 200 points = finishes ahead 76% of the time; "
+           "heuristic is fixed at 1000")
+    ax.grid(axis="x", visible=False)
+    fig.tight_layout()
+    path = Path(out) if out else run_dir / "elo.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=SURFACE)
+    plt.close(fig)
+    return path
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Draw the learning curve and diagnostics of a training run.")
     ap.add_argument("run_dir")
-    ap.add_argument("--out", help="folder for <run id>_curve.png and <run id>_diagnostics.png "
-                    "(default: learning_curve.png and diagnostics.png inside the run folder)")
+    ap.add_argument("--out", help="folder for <run id>_curve.png, <run id>_diagnostics.png and, for a "
+                    "league run, <run id>_elo.png (default: inside the run folder)")
     args = ap.parse_args(argv)
     run_dir = Path(args.run_dir)
     out = Path(args.out) if args.out else None
-    for fn, name in ((learning_curve, "curve"), (diagnostics, "diagnostics")):
+    for fn, name in ((learning_curve, "curve"), (diagnostics, "diagnostics"), (elo_chart, "elo")):
         p = fn(run_dir, out / f"{run_dir.name}_{name}.png" if out else None)
         print(f"saved {p}" if p else f"nothing to draw for {name}")
 

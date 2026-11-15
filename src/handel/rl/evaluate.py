@@ -29,18 +29,21 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..analysis import Estimate, ratio_ci, wilson
-from ..bots import BOTS
 from ..engine.state import GameConfig
+from .opponents import OPPONENTS
 from .policy import PolicyNet, load_checkpoint, random_policy
 from .rollout import RL, GameRollout, GameSpec, collect
 
 RANDOM_POLICY = "random-policy"
 
 
-def schedule(opponents: list[str], games: int, first_seed: int, rotate: bool) -> list[GameSpec]:
+def schedule(opponents: list[str], games: int, first_seed: int, rotate: bool,
+             entrant: str = RL) -> list[GameSpec]:
     """Seed by seed, every rotation. In rotation r seat i holds entrant (i + r) mod n,
-    where the entrants are ``["rl", *opponents]`` (the tournament runner's scheme)."""
-    entrants = [RL, *opponents]
+    where the entrants are ``["rl", *opponents]`` (the tournament runner's scheme).
+
+    ``entrant`` puts a bot in the RL agent's place, to measure a reference on the same games."""
+    entrants = [entrant, *opponents]
     n = len(entrants)
     rotations = list(range(n)) if rotate else [0]
     n_seeds = -(-games // len(rotations))
@@ -63,12 +66,12 @@ def _estimate(clusters: list[tuple[float, float]], proportion: bool) -> Estimate
     return est
 
 
-def summarize(rollouts: list[GameRollout]) -> dict:
-    """Outcome statistics for the RL seat(s) across all games."""
+def summarize(rollouts: list[GameRollout], who: str = RL) -> dict:
+    """Outcome statistics for the RL seat(s) across all games (or for the seats named ``who``)."""
     by_seed: dict[int, list[tuple[GameRollout, int]]] = defaultdict(list)
     for g in rollouts:
         for seat, name in enumerate(g.lineup):
-            if name == RL:
+            if name == who:
                 by_seed[g.seed].append((g, seat))
     rl_seats = [x for xs in by_seed.values() for x in xs]
 
@@ -91,7 +94,7 @@ def summarize(rollouts: list[GameRollout]) -> dict:
     opp_seats: Counter[str] = Counter()
     for g in rollouts:
         for seat, name in enumerate(g.lineup):
-            if name != RL:
+            if name != who:
                 opp_seats[name] += 1
                 opp_wins[name] += int(g.winner == seat)
     n_games = len(rollouts)
@@ -163,7 +166,7 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Evaluate an RL policy against bots.")
     ap.add_argument("policy", help=f"checkpoint path, or '{RANDOM_POLICY}' for untrained weights")
     ap.add_argument("--opponents", default="heuristic,heuristic,heuristic",
-                    help=f"comma-separated bots for the other seats; available: {', '.join(sorted(BOTS))}")
+                    help=f"comma-separated bots for the other seats; available: {', '.join(sorted(OPPONENTS))}")
     ap.add_argument("--games", type=int, default=2000, help="total games (rounded up to whole seeds)")
     ap.add_argument("--rotate", action=argparse.BooleanOptionalAction, default=True,
                     help="play every seed in every seat rotation (default on)")
@@ -179,8 +182,8 @@ def main(argv: list[str] | None = None) -> None:
 
     opponents = [x.strip() for x in args.opponents.split(",") if x.strip()]
     for name in opponents:
-        if name not in BOTS:
-            ap.error(f"unknown bot {name!r}; choose from {sorted(BOTS)}")
+        if name not in OPPONENTS:
+            ap.error(f"unknown bot {name!r}; choose from {sorted(OPPONENTS)}")
     if not 1 <= len(opponents) <= 3:
         ap.error("the RL encoder supports 2 to 4 players: give 1 to 3 opponents")
     policy_seed = args.seed if args.policy_seed is None else args.policy_seed
