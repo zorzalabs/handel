@@ -7,3 +7,4 @@ dist/
 .env
 results/
 .DS_Store
+runs/

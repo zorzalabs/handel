@@ -16,6 +16,7 @@ handel-tournament = "handel.tournament:main"
 handel-analyze = "handel.analysis:main"
 handel-export = "handel.export:main"
 handel-gif = "handel.gif:main"
+handel-rl-eval = "handel.rl.evaluate:main"
 
 [dependency-groups]
 analysis = [
@@ -25,6 +26,10 @@ analysis = [
     "nbformat>=5.11.1",
 ]
 dev = ["pytest>=8.3"]
+rl = [
+    "numpy>=2.5.4",
+    "torch>=2.15.0",
+]
 
 [build-system]
 requires = ["hatchling"]
