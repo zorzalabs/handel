@@ -69,6 +69,16 @@ TRADE_RESPONSE context (offset 604, zeros in other phases; used from Phase 11)::
     661         cash I would give / 1500, clipped to [0, 4]
     662         counteroffers left / max_counters
     663..666    the other side, one-hot over relative seats 0..3
+
+Trade hint (optional, ``encode(..., hint=True)``; then the vector has
+``OBS_SIZE_HINT`` = 669 entries). It tells the network how the heuristic bot
+rates the offer on the table (``trade.heuristic_view``), which is computed
+from public information only. Zeros outside TRADE_RESPONSE::
+
+    667         the heuristic's trade utility of the offer for me / 500, clipped to [-4, 4]
+    668         the heuristic bot would accept this offer (utility above its threshold)
+
+A network says which of the two sizes it takes through ``PolicyConfig.obs_size``.
 """
 
 from __future__ import annotations
@@ -78,6 +88,7 @@ import numpy as np
 from ..engine.board import BOARD, BOARD_SIZE, GROUP_MEMBERS, PROPERTY_POSITIONS
 from ..engine.rules import liquidation_value, net_worth
 from ..engine.state import BANK, GameState, Phase
+from .trade import heuristic_view
 
 MAX_PLAYERS = 4
 NUM_PROPERTIES = len(PROPERTY_POSITIONS)
@@ -95,6 +106,10 @@ RAISE_FEATURES = 3 + MAX_PLAYERS + 1  # 8
 TRADE_OFFSET = RAISE_OFFSET + RAISE_FEATURES  # 604
 TRADE_FEATURES = 2 * NUM_PROPERTIES + 3 + MAX_PLAYERS  # 63
 OBS_SIZE = TRADE_OFFSET + TRADE_FEATURES  # 667
+HINT_OFFSET = OBS_SIZE  # 667
+HINT_FEATURES = 2
+OBS_SIZE_HINT = OBS_SIZE + HINT_FEATURES  # 669
+HINT_SCALE = 500.0
 
 DECISION_PHASES = (Phase.JAIL, Phase.BUY, Phase.MANAGE, Phase.RAISE_FUNDS, Phase.TRADE_RESPONSE)
 _PHASE_SLOT = {ph: i for i, ph in enumerate(DECISION_PHASES)}
@@ -112,12 +127,25 @@ def _clip(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
 
 
-def encode(s: GameState, player: int) -> np.ndarray:
-    """Feature vector of shape ``(OBS_SIZE,)`` for ``player`` (see the module docstring)."""
+def uses_hint(obs_size: int) -> bool:
+    """Whether a network with ``obs_size`` inputs wants the trade hint features."""
+    if obs_size == OBS_SIZE:
+        return False
+    if obs_size == OBS_SIZE_HINT:
+        return True
+    raise ValueError(f"a policy must take {OBS_SIZE} inputs, or {OBS_SIZE_HINT} with the trade hint; "
+                     f"got {obs_size}")
+
+
+def encode(s: GameState, player: int, hint: bool = False) -> np.ndarray:
+    """Feature vector for ``player`` (see the module docstring).
+
+    Shape ``(OBS_SIZE,)``, or ``(OBS_SIZE_HINT,)`` with ``hint=True``.
+    """
     n = s.num_players
     if n > MAX_PLAYERS:
         raise ValueError(f"the RL encoder supports at most {MAX_PLAYERS} players, got {n}")
-    obs = np.zeros(OBS_SIZE, dtype=np.float32)
+    obs = np.zeros(OBS_SIZE_HINT if hint else OBS_SIZE, dtype=np.float32)
     owner, houses, mortgaged = s.owner, s.houses, s.mortgaged
 
     def rel(seat: int) -> int:
@@ -200,10 +228,15 @@ def encode(s: GameState, player: int) -> np.ndarray:
         obs[k + 1] = _clip(cash_out / CASH_SCALE, 0.0, 4.0)
         obs[k + 2] = (cfg.max_counters - s.counters_used) / cfg.max_counters if cfg.max_counters else 0.0
         obs[k + 3 + rel(other)] = 1.0
+        if hint:
+            utility, threshold = heuristic_view(s, player)
+            obs[HINT_OFFSET] = _clip(utility / HINT_SCALE, -4.0, 4.0)
+            if utility > threshold:
+                obs[HINT_OFFSET + 1] = 1.0
     return obs
 
 
-def feature_names() -> list[str]:
+def feature_names(hint: bool = False) -> list[str]:
     """One short name per index, matching the docstring table (for debugging)."""
     names: list[str] = []
     for pos in PROPERTY_POSITIONS:
@@ -225,4 +258,6 @@ def feature_names() -> list[str]:
     names += ["trade.cash_in", "trade.cash_out", "trade.counters_left"]
     names += [f"trade.other_rel{r}" for r in range(MAX_PLAYERS)]
     assert len(names) == OBS_SIZE
+    if hint:
+        names += ["hint.heuristic_utility", "hint.heuristic_accepts"]
     return names

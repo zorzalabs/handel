@@ -1,0 +1,78 @@
+# Phase 11: the agent learns to answer trade offers, 4 players.
+# Same league as Phase 10 (league_4p.toml) with three changes:
+#   1. [agent] trade_mode = "respond": the network accepts, rejects or counters offers itself,
+#      and the heuristic bot proposes trades on its behalf
+#   2. the trade-happy bots lowball and generous are in the opponent pool
+#   3. it starts from the best Phase 10 checkpoint
+#
+#   uv run handel-train configs/rl/league_4p_respond.toml
+#   uv run handel-train --resume runs/league_4p_respond_s0        (after stopping it)
+#
+# The same run without the trade hint (to test whether the hint helps):
+#   uv run handel-train configs/rl/league_4p_respond.toml --set agent.trade_hint=false --run-id league_4p_respond_nohint_s0
+
+name = "league_4p_respond"
+seed = 0
+total_steps = 300_000_000   # RL decisions; about 5 to 6 hours on an Apple M1 (not measured on an idle machine yet)
+init_from = "runs/league_4p_s0/best.pt"
+
+[game]
+players = 4
+max_rounds = 150
+
+[agent]
+trade_mode = "respond"    # who answers offers and who proposes; the table is in src/handel/rl/trade.py
+trade_hint = true         # the observation also holds how the heuristic bot rates the offer (2 extra inputs)
+
+[opponents]
+# Bots for the "bots" share of the league mix. A name listed twice is drawn twice as often.
+# lowball makes bad offers on purpose, generous sometimes makes very good ones (src/handel/rl/trade_bots.py).
+pool = ["heuristic", "heuristic", "lowball", "lowball", "generous", "heuristic_notrade", "always_buy"]
+
+[league]
+snapshot_every = 25       # updates between snapshots; every snapshot also plays a rating round
+current = 0.4             # share of the other seats: the current policy (self-play, also learned from)
+snapshots = 0.4           # ... a past snapshot
+bots = 0.2                # ... a bot from [opponents] pool
+recent_count = 8          # half of the snapshot seats come from the newest 8 snapshots,
+recent_share = 0.5        # the other half from all snapshots, so old ones never disappear
+rating_games = 200        # Elo games per snapshot
+rating_k = 32.0
+
+[model]
+hidden = [256, 256]
+end_turn_bias = 2.0       # only matters for a fresh network (ignored with init_from)
+
+[ppo]
+steps_per_update = 65536
+epochs = 4
+minibatch_size = 4096
+lr = 1e-4
+anneal_lr = true          # decays to 0 at total_steps
+gamma = 1.0
+gae_lambda = 0.99
+clip = 0.2
+vf_coef = 0.5
+ent_coef = 0.0
+max_grad_norm = 0.5
+target_kl = 0.0
+
+[reward]
+win = 1.0
+shaping_coef = 0.0
+shaping_decay = true
+
+[eval]
+every = 50                # updates between evaluations; keep it a multiple of league.snapshot_every
+games = 1000
+lineups = [
+    ["heuristic", "heuristic", "heuristic"],     # the fixed benchmark: picks best.pt and drives the self-play warning
+    ["lowball", "lowball", "lowball"],           # does it turn bad offers down? (an agent that accepts them loses here)
+    ["lowball", "heuristic", "generous"],        # good and bad offers at one table
+]
+
+[run]
+workers = 0               # 0 = one rollout process per CPU core
+learner_threads = 4
+checkpoint_every = 100
+entropy_warn = 0.05       # warn when the policy entropy falls below this (nats)

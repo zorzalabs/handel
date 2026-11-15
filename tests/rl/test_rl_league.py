@@ -234,7 +234,7 @@ def test_snapshot_seats_play_from_disk_and_are_not_recorded(tmp_path):
 def test_exploiters_are_extra_opponents_and_the_bot_registry_is_untouched():
     assert set(EXPLOITERS) == {"streets_only", "late_builder", "all_in"}
     assert set(BOTS) == {"random", "always_buy", "heuristic", "heuristic_notrade"}
-    assert set(OPPONENTS) == set(BOTS) | set(EXPLOITERS)
+    assert set(EXPLOITERS) <= set(OPPONENTS) and set(BOTS) <= set(OPPONENTS)  # Phase 11 adds the trade bots
     assert make_opponent("late_builder", 3).name == "late_builder"
     with pytest.raises(ValueError, match="unknown opponent"):
         make_opponent("nobody")

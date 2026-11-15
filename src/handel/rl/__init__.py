@@ -19,4 +19,7 @@ Modules (import them directly; this package imports nothing so that
 * ``ratings``: Elo ratings for snapshots and bots; the self-play warning
 * ``exploiters``, ``opponents``: bots with one odd habit, and all opponents by name
 * ``probe``: play a policy against the exploiter bots
+* ``trade``: trade modes (Phase 11): who answers offers and who proposes, the counter action
+* ``trade_bots``: the ``lowball`` and ``generous`` bots, which make sure the agent sees offers
+* ``trade_quality``: fair value report on the offers a policy answered
 """

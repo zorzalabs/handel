@@ -22,11 +22,12 @@ import json
 from pathlib import Path
 
 from ..engine.state import GameConfig
-from .evaluate import load_policy, schedule, summarize
+from .evaluate import load_policy, mode_tag, resolve_trade_mode, schedule, summarize
 from .exploiters import EXPLOITERS
 from .opponents import OPPONENTS
 from .policy import PolicyNet
 from .rollout import RL, RolloutPool
+from .trade import DEFAULT_TRADE_MODE, TRADE_MODES
 
 BASELINE = "heuristic"
 REFERENCES = ("heuristic_notrade", "heuristic")
@@ -34,7 +35,8 @@ REFERENCES = ("heuristic_notrade", "heuristic")
 
 def probe(net: PolicyNet, games: int = 2000, seed: int = 0, references: tuple[str, ...] = REFERENCES,
           opponents: tuple[str, ...] = (BASELINE, *EXPLOITERS), players: int = 4,
-          workers: int | None = None, config: GameConfig | None = None) -> dict[str, dict[str, dict | None]]:
+          workers: int | None = None, config: GameConfig | None = None,
+          trade_mode: str = DEFAULT_TRADE_MODE) -> dict[str, dict[str, dict | None]]:
     """``{opponent: {entrant: win rate estimate}}`` with entrants ``"rl"`` and the references.
 
     An entrant that is the same bot as its three opponents is skipped
@@ -49,7 +51,7 @@ def probe(net: PolicyNet, games: int = 2000, seed: int = 0, references: tuple[st
                     out[opp][entrant] = None
                     continue
                 specs = schedule([opp] * (players - 1), games, seed, rotate=True, entrant=entrant)
-                rollouts = pool.collect(net, specs, config, record=False)
+                rollouts = pool.collect(net, specs, config, record=False, trade_mode=trade_mode)
                 out[opp][entrant] = summarize(rollouts, who=entrant)["win_rate"]
     return out
 
@@ -80,6 +82,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--seed", type=int, default=0, help="first game seed")
     ap.add_argument("--references", default=",".join(REFERENCES),
                     help="bots to put in the agent's seat for comparison (comma-separated, may be empty)")
+    ap.add_argument("--trade-mode", choices=sorted(TRADE_MODES), default=None,
+                    help="how the RL seat trades (default: the mode the checkpoint was trained in)")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--out", default=None, help="JSON path (default: eval/<checkpoint>_probe_... next to it)")
     args = ap.parse_args(argv)
@@ -88,15 +92,17 @@ def main(argv: list[str] | None = None) -> None:
         if name not in OPPONENTS:
             ap.error(f"unknown bot {name!r}; choose from {sorted(OPPONENTS)}")
     net, meta = load_policy(args.policy, args.seed)
-    result = probe(net, args.games, args.seed, references, workers=args.workers)
+    trade_mode = resolve_trade_mode(args.trade_mode, meta)
+    result = probe(net, args.games, args.seed, references, workers=args.workers, trade_mode=trade_mode)
     print(format_probe(result))
+    print(f"the RL agent played in trade mode {trade_mode!r}")
     ck = Path(args.policy)
     out = Path(args.out) if args.out else (
         (ck.parent / "eval" if ck.suffix == ".pt" else Path("runs") / "baselines")
-        / f"{ck.stem}_probe_n{args.games}_s{args.seed}.json")
+        / f"{ck.stem}_probe_n{args.games}_s{args.seed}{mode_tag(trade_mode)}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"policy": meta, "games_per_cell": args.games, "first_seed": args.seed,
-                               "win_rates": result}, indent=1), encoding="utf-8")
+                               "trade_mode": trade_mode, "win_rates": result}, indent=1), encoding="utf-8")
     print(f"saved {out}")
 
 

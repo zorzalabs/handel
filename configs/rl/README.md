@@ -68,6 +68,58 @@ changed, see `src/handel/rl/exploiters.py`) and prints its win rate next to
 that of two reference bots in the same seats. The exploiter names also work
 with `--opponents` in `handel-rl-eval` and `handel.rl.debug`.
 
+## Answering trade offers (Phase 11)
+
+`league_4p_respond.toml` is the Phase 10 league with an `[agent]` section:
+
+```toml
+[agent]
+trade_mode = "respond"   # the network answers offers; the heuristic bot proposes trades for it
+trade_hint = true        # 2 extra inputs: how the heuristic bot rates the offer on the table
+```
+
+`trade_mode` says who does what (`src/handel/rl/trade.py`):
+
+| Mode | Answers offers | Proposes trades |
+|---|---|---|
+| `heuristic` (default, Phases 8 to 10) | heuristic bot | nobody |
+| `heuristic_propose` | heuristic bot | heuristic bot |
+| `respond_only` | the network | nobody |
+| `respond` (Phase 11) | the network | heuristic bot |
+
+When the network answers, it picks accept, reject, or "counter with the
+heuristic bot's suggestion" (only offered when there is such a counter).
+The pool also holds two trade-happy bots (`src/handel/rl/trade_bots.py`):
+`lowball` asks for set-completing squares for far too little cash, and
+`generous` sometimes sells such squares cheaply.
+
+```bash
+uv run handel-train configs/rl/league_4p_respond.toml       # needs runs/league_4p_s0/best.pt
+uv run handel-train --resume runs/league_4p_respond_s0
+# the same run without the hint inputs
+uv run handel-train configs/rl/league_4p_respond.toml --set agent.trade_hint=false --run-id league_4p_respond_nohint_s0
+```
+
+A checkpoint remembers the trade mode it was trained in, and `handel-rl-eval`,
+`handel.rl.debug`, `handel.rl.probe` and `handel.rl.trade_quality` use it
+unless `--trade-mode` says otherwise. Checkpoints from before Phase 11 play in
+`heuristic` mode, as they always did. To compare fairly, play the older
+checkpoint with the same proposals:
+
+```bash
+uv run handel-rl-eval runs/league_4p_respond_s0/best.pt --opponents heuristic,heuristic,heuristic --games 4000 --seed 0
+uv run handel-rl-eval runs/league_4p_s0/best.pt --opponents heuristic,heuristic,heuristic --games 4000 --seed 0 --trade-mode heuristic_propose
+```
+
+The trade quality report values a sample of the offers the agent answered
+with the Monte Carlo fair value estimator and scores its answers next to the
+heuristic bot's answers to the same offers (about 3 seconds per offer on a
+busy machine; a stopped run continues when the command is run again):
+
+```bash
+uv run python -m handel.rl.trade_quality runs/league_4p_respond_s0/best.pt --offers 200 --rollouts 300
+```
+
 The untrained baseline (a fresh network) is evaluated with:
 
 ```bash

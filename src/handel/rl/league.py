@@ -144,7 +144,8 @@ class League:
         for b in self.bots:
             self.ratings.add(b)
         specs = rating_specs(self.cfg, update, self.snapshots, self.bots)
-        games = pool.collect(net, specs, self.cfg.game_config(), record=False, snapshot_dir=str(self.dir))
+        games = pool.collect(net, specs, self.cfg.game_config(), record=False, snapshot_dir=str(self.dir),
+                             trade_mode=self.cfg.trade_mode)
         # How often the new snapshot finished ahead of an older snapshot, and ahead of a bot.
         ahead = {"snapshots": [0, 0], "bots": [0, 0]}
         for g in games:

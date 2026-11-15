@@ -41,6 +41,10 @@ current policy and its older snapshots as well as bots, and also writes::
     elo.png             redrawn after every evaluation
     warnings.csv        entropy and self-play warnings (also printed)
 
+With ``[agent] trade_mode = "respond"`` (Phase 11, see ``trade.py``) the network
+also answers trade offers, and ``train.csv`` gets four more columns: offers
+answered per RL seat and the share it accepted, rejected and countered.
+
 Every checkpoint works with ``handel-rl-eval``. Same seed and same config give
 the same weights on the same machine, with any number of workers, and a
 resumed run continues exactly as if it had never stopped.
@@ -65,6 +69,8 @@ import numpy as np
 import torch
 from torch import nn
 
+from ..engine.state import Phase
+from .actions import ACCEPT, COUNTER_HEURISTIC, REJECT
 from .evaluate import schedule, summarize
 from .league import League
 from .policy import (
@@ -75,9 +81,11 @@ from .policy import (
     random_policy,
     read_checkpoint,
     save_checkpoint,
+    widen_inputs,
 )
 from .ratings import self_play_warning
 from .rollout import GameRollout, RolloutPool
+from .trade import get_trade_mode
 from .train_config import (
     CURVE_SEED_BASE,
     PPOConfig,
@@ -92,6 +100,7 @@ from .train_config import (
 FIRST_GUESS_STEPS_PER_GAME = 200.0  # only used to size the very first batch
 MIN_GAMES_PER_UPDATE = 8
 ENTROPY_WARN_EVERY = 50  # while the entropy stays low, repeat the warning every this many updates
+TRADE_ANSWERS = (ACCEPT, REJECT, COUNTER_HEURISTIC)  # the order of ``Batch.answers``
 
 
 # --- Rewards and advantages -------------------------------------------------------------
@@ -146,6 +155,7 @@ class Batch:
     games: int  # RL seats played (one per game; more when the current policy fills other seats too)
     wins: int
     reward_sum: float  # sum of all rewards (terminal + shaping)
+    answers: tuple[int, int, int] = (0, 0, 0)  # offers the network accepted, rejected, countered
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -157,6 +167,8 @@ def build_batch(rollouts: list[GameRollout], cfg: TrainConfig, shaping_coef: flo
                                           ("obs", "masks", "actions", "logps", "values", "adv", "ret")}
     games = wins = 0
     reward_sum = 0.0
+    answers = [0, 0, 0]
+    trade_phase = int(Phase.TRADE_RESPONSE)
     for g in rollouts:
         for tr in g.trajectories:
             games += 1
@@ -171,6 +183,10 @@ def build_batch(rollouts: list[GameRollout], cfg: TrainConfig, shaping_coef: flo
                 shaped = shaping_coef * shaping_rewards(tr.shares, tr.final_share)
                 rewards += shaped
                 reward_sum += float(shaped.sum())
+            answered = tr.actions[tr.phases == trade_phase]
+            if len(answered):
+                for k, index in enumerate(TRADE_ANSWERS):
+                    answers[k] += int((answered == index).sum())
             adv, ret = gae(rewards, tr.values, cfg.ppo.gamma, cfg.ppo.gae_lambda)
             for k, x in (("obs", tr.obs), ("masks", tr.masks), ("actions", tr.actions),
                          ("logps", tr.logps), ("values", tr.values), ("adv", adv), ("ret", ret)):
@@ -179,7 +195,7 @@ def build_batch(rollouts: list[GameRollout], cfg: TrainConfig, shaping_coef: flo
         raise RuntimeError("the batch has no RL decisions; check the lineup")
     cat = {k: np.concatenate(v) for k, v in parts.items()}
     return Batch(cat["obs"], cat["masks"], cat["actions"], cat["logps"], cat["values"],
-                 cat["adv"], cat["ret"], games, wins, reward_sum)
+                 cat["adv"], cat["ret"], games, wins, reward_sum, (answers[0], answers[1], answers[2]))
 
 
 # --- The PPO update -----------------------------------------------------------------------
@@ -312,7 +328,8 @@ def trim_rows(path: Path, last_update: int) -> None:
 
 def _meta(cfg: TrainConfig, run_id: str, state: TrainState, commit: str | None) -> dict:
     return {"run_id": run_id, "config": cfg.name, "seed": cfg.seed, "update": state.update,
-            "steps": state.steps, "games": state.games, "git_commit": commit}
+            "steps": state.steps, "games": state.games, "git_commit": commit,
+            "trade_mode": cfg.trade_mode}  # the evaluation commands play a checkpoint in this mode
 
 
 def evaluate(pool: RolloutPool, net: PolicyNet, cfg: TrainConfig, state: TrainState) -> list[dict]:
@@ -320,7 +337,7 @@ def evaluate(pool: RolloutPool, net: PolicyNet, cfg: TrainConfig, state: TrainSt
     rows = []
     for opponents in cfg.eval.lineups:
         specs = schedule(list(opponents), cfg.eval.games, CURVE_SEED_BASE, rotate=True)
-        s = summarize(pool.collect(net, specs, cfg.game_config(), record=False))
+        s = summarize(pool.collect(net, specs, cfg.game_config(), record=False, trade_mode=cfg.trade_mode))
         w = s["win_rate"]
         ci = w["ci"] or [None, None]
         rows.append({
@@ -358,6 +375,7 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
     elo_csv, warn_csv = run_dir / "elo.csv", run_dir / "warnings.csv"
     commit = git_commit()
     league = League(cfg, run_dir) if cfg.league.enabled else None
+    policy_answers = get_trade_mode(cfg.trade_mode).policy_answers
 
     # Seeds. Nothing below draws from the global generators (games are seeded per game,
     # minibatches per update), but set them anyway so stray randomness is repeatable.
@@ -383,8 +401,16 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
         if cfg.init_from:  # curriculum: start from the weights of an earlier run
             net, _ = load_checkpoint(cfg.init_from)
             echo(f"starting from the weights in {cfg.init_from}")
+            if net.cfg.obs_size > cfg.obs_size:
+                raise ValueError(f"{cfg.init_from} was trained with the trade hint features; "
+                                 "set agent.trade_hint = true to continue from it")
+            if net.cfg.obs_size < cfg.obs_size:
+                # New input columns start at 0: the network plays exactly as before until it learns to use them.
+                added = cfg.obs_size - net.cfg.obs_size
+                net = widen_inputs(net, cfg.obs_size)
+                echo(f"added {added} trade hint inputs (their weights start at 0)")
         else:
-            net = random_policy(cfg.seed, PolicyConfig(hidden=list(cfg.hidden),
+            net = random_policy(cfg.seed, PolicyConfig(obs_size=cfg.obs_size, hidden=list(cfg.hidden),
                                                        end_turn_bias=cfg.end_turn_bias))
         optimizer = torch.optim.Adam(net.parameters(), lr=cfg.ppo.lr, eps=1e-5)
         save_config(cfg, run_dir / "config.json")
@@ -468,9 +494,11 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
             n_games = max(MIN_GAMES_PER_UPDATE, math.ceil(cfg.ppo.steps_per_update / state.steps_per_game))
             if league:
                 specs = league.specs(state.games, n_games)
-                rollouts = pool.collect(net, specs, cfg.game_config(), snapshot_dir=str(league.dir))
+                rollouts = pool.collect(net, specs, cfg.game_config(), snapshot_dir=str(league.dir),
+                                        trade_mode=cfg.trade_mode)
             else:
-                rollouts = pool.collect(net, training_specs(cfg, state.games, n_games), cfg.game_config())
+                rollouts = pool.collect(net, training_specs(cfg, state.games, n_games), cfg.game_config(),
+                                        trade_mode=cfg.trade_mode)
             # 2. and 3. Rewards and GAE.
             batch = build_batch(rollouts, cfg, shaping)
             t1 = time.perf_counter()
@@ -501,13 +529,21 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
             }
             if league:  # how many seats per game the current policy played (the learner plus self-play)
                 row["rl_seats_per_game"] = round(batch.games / n_games, 3)
+            trade_note = ""
+            if policy_answers:  # how the network answered the offers it got in this batch
+                offers = sum(batch.answers)
+                accepted, rejected, countered = (round(k / offers, 4) if offers else "" for k in batch.answers)
+                row.update({"offers_per_seat": round(offers / batch.games, 3), "accept_share": accepted,
+                            "reject_share": rejected, "counter_share": countered})
+                trade_note = f" | {row['offers_per_seat']:.1f} offers/seat" + (
+                    f", {accepted:.0%} accepted, {countered:.0%} countered" if offers else "")
             append_row(train_csv, row)
             eta = (cfg.total_steps - state.steps) / max(row["steps_per_s"], 1)
             echo(f"upd {state.update:4d} | {_fmt_steps(state.steps):>6}/{_fmt_steps(cfg.total_steps)} steps"
                  f" | win {row['win_rate']:6.1%} | reward {row['mean_reward']:+.3f}"
                  f" | {row['steps_per_game']:5.0f} steps/game | entropy {stats['entropy']:.2f}"
                  f" | kl {stats['approx_kl']:.4f} | clip {stats['clip_frac']:.2f}"
-                 f" | ev {stats['explained_var']:+.2f} | {row['steps_per_s'] / 1e3:.1f}k steps/s"
+                 f" | ev {stats['explained_var']:+.2f}{trade_note} | {row['steps_per_s'] / 1e3:.1f}k steps/s"
                  f" | left {_fmt_time(max(eta, 0))}")
             # Guard rail: a policy that is nearly deterministic has stopped exploring.
             if cfg.entropy_warn and stats["entropy"] < cfg.entropy_warn:
@@ -609,7 +645,8 @@ def main(argv: list[str] | None = None) -> None:
     mix = (f"league ({lg.current:.0%} current policy, {lg.snapshots:.0%} snapshots, {lg.bots:.0%} bots "
            f"from {list(cfg.opponents)})" if lg.enabled else f"opponents from {list(cfg.opponents)}")
     print(f"run {run_dir.name}: {cfg.players} players, {mix}, "
-          f"{_fmt_steps(cfg.total_steps)} steps, seed {cfg.seed}")
+          f"{_fmt_steps(cfg.total_steps)} steps, seed {cfg.seed}, trade mode {cfg.trade_mode!r}"
+          + (" with the trade hint" if cfg.trade_hint else ""))
     limit = None if args.max_minutes is None else args.max_minutes * 60
     try:
         # flush: progress shows up at once, also when the output goes to a file or through tee

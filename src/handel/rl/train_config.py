@@ -42,6 +42,12 @@ policy, by older snapshots of it and by bots from ``[opponents] pool``::
     snapshots = 0.4             # ... a past snapshot
     bots = 0.2                  # ... a bot from [opponents] pool
 
+An ``[agent]`` section says how the RL seats trade (Phase 11, see ``trade.py``)::
+
+    [agent]
+    trade_mode = "respond"      # the network answers offers; the heuristic bot proposes for it
+    trade_hint = true           # add the heuristic's rating of the offer to the observation
+
 Every key is optional except ``name``. Unknown keys are an error, so a typo
 cannot silently fall back to a default. The resolved config is saved as
 ``config.json`` in the run folder and a resumed run reads it from there.
@@ -65,9 +71,10 @@ from pathlib import Path
 from typing import Any
 
 from ..engine.state import GameConfig
-from .observation import MAX_PLAYERS
+from .observation import MAX_PLAYERS, OBS_SIZE, OBS_SIZE_HINT
 from .opponents import OPPONENTS
 from .rollout import RL, GameSpec
+from .trade import DEFAULT_TRADE_MODE, TRADE_MODES
 
 CURVE_SEED_BASE = 500_000_000
 RATING_SEED_BASE = 700_000_000
@@ -142,10 +149,17 @@ class TrainConfig:
     learner_threads: int = 4  # torch threads for the PPO update
     checkpoint_every: int = 25  # updates between numbered checkpoints (0 = only latest and best)
     entropy_warn: float = 0.0  # warn when the policy entropy (nats) falls below this (0 = never)
+    trade_mode: str = DEFAULT_TRADE_MODE  # who answers offers and who proposes (trade.py)
+    trade_hint: bool = False  # the observation also holds the heuristic's rating of an offer
 
     @property
     def run_id(self) -> str:
         return f"{self.name}_s{self.seed}"
+
+    @property
+    def obs_size(self) -> int:
+        """Inputs of the network this config trains."""
+        return OBS_SIZE_HINT if self.trade_hint else OBS_SIZE
 
     def game_config(self) -> GameConfig:
         return GameConfig(max_rounds=self.max_rounds)
@@ -173,6 +187,11 @@ class TrainConfig:
             raise ValueError("ppo.gamma must be in (0, 1] and ppo.gae_lambda in [0, 1]")
         if self.seed < 0:
             raise ValueError("seed must not be negative")
+        if self.trade_mode not in TRADE_MODES:
+            raise ValueError(f"agent.trade_mode must be one of {sorted(TRADE_MODES)}, got {self.trade_mode!r}")
+        if self.trade_hint and not TRADE_MODES[self.trade_mode].policy_answers:
+            raise ValueError("agent.trade_hint only makes sense when the network answers offers "
+                             "(agent.trade_mode \"respond\" or \"respond_only\")")
         lg = self.league
         if lg.enabled:
             shares = (lg.current, lg.snapshots, lg.bots)
@@ -192,6 +211,7 @@ _FLAT: dict[str, tuple[str, ...]] = {
     "game": ("players", "max_rounds"),
     "model": ("hidden", "end_turn_bias"),
     "run": ("workers", "learner_threads", "checkpoint_every", "entropy_warn"),
+    "agent": ("trade_mode", "trade_hint"),
 }
 _TOP = ("name", "seed", "total_steps", "init_from")
 

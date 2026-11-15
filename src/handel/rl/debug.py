@@ -6,6 +6,8 @@
 ``game`` plays one game and prints every decision the network made: the round,
 the phase, the agent's cash and share of all net worth, the value estimate,
 the three most likely actions with their probabilities, and the action taken.
+When the network answers a trade offer (``--trade-mode respond``), the line
+also shows the offer.
 
 ``value`` plays many games and checks the value head. The estimate should be
 higher in positions where the agent is clearly ahead than where it is clearly
@@ -24,13 +26,15 @@ from ..engine.actions import Action
 from ..engine.board import BOARD
 from ..engine.state import GameConfig, GameState, Phase
 from ..runner import GameResult, bot_seed, play_game
-from .actions import BUY, DECLINE_BUY, describe, from_index
+from ..llm.observation import describe_offer
+from .actions import BUY, COUNTER_HEURISTIC, DECLINE_BUY, describe, from_index
 from .agent import RLAgent, Step
-from .evaluate import load_policy, schedule
+from .evaluate import load_policy, resolve_trade_mode, schedule
 from .opponents import OPPONENTS, make_opponent
 from .policy import NumpyPolicy
 from .ppo import terminal_reward
 from .rollout import GameRollout, RolloutPool
+from .trade import DEFAULT_TRADE_MODE, TRADE_MODES
 
 MIN_BUCKET = 30  # decisions needed in a bucket before the value check judges it
 
@@ -42,14 +46,14 @@ class TracingAgent(RLAgent):
     """An ``RLAgent`` that calls ``on_decision(state, player, step)`` after every network decision."""
 
     def __init__(self, policy: NumpyPolicy, on_decision: Callable[[GameState, int, Step], None],
-                 seed: int = 0, deterministic: bool = False) -> None:
-        super().__init__(policy, seed=seed, deterministic=deterministic, record=True)
+                 seed: int = 0, deterministic: bool = False, trade_mode: str = DEFAULT_TRADE_MODE) -> None:
+        super().__init__(policy, seed=seed, deterministic=deterministic, trade_mode=trade_mode, record=True)
         self.on_decision = on_decision
 
     def choose(self, state: GameState, player: int, legal: list[Action]) -> Action:
         before = len(self.steps)
         action = super().choose(state, player, legal)
-        if len(self.steps) > before:  # the network decided (not a forced move, not a trade answer)
+        if len(self.steps) > before:  # the network decided (not a forced move, not the heuristic)
             self.on_decision(state, player, self.steps[-1])
         return action
 
@@ -58,6 +62,8 @@ def action_name(i: int, state: GameState) -> str:
     """Action index as text, with the city name instead of the board position."""
     if i in (BUY, DECLINE_BUY):
         return f"{describe(i)} {BOARD[state.pending_buy].name}"
+    if i == COUNTER_HEURISTIC:
+        return describe(i)
     a = from_index(i, state)
     pos = getattr(a, "pos", None)
     return describe(i) if pos is None else f"{type(a).__name__} {BOARD[pos].name}"
@@ -68,14 +74,18 @@ def decision_line(policy: NumpyPolicy, state: GameState, player: int, step: Step
     order = np.argsort(-logp)[:top]
     best = ", ".join(f"{action_name(int(legal[k]), state)} {np.exp(logp[k]):.0%}" for k in order)
     more = f" (+{len(legal) - top} more)" if len(legal) > top else ""
+    offer = ""
+    if step.phase == Phase.TRADE_RESPONSE and state.trade is not None:
+        offer = f" | offer: {describe_offer(state.trade, viewer=player)}"
     return (f"round {state.round:3d} {Phase(step.phase).name:<11} cash {state.players[player].cash:5d} "
             f"share {step.share:4.0%} value {step.value:+.2f} | {best}{more} -> "
-            f"{action_name(step.action, state)}")
+            f"{action_name(step.action, state)}{offer}")
 
 
 def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: int = 0,
                deterministic: bool = False, config: GameConfig | None = None,
-               limit: int | None = None, out: Callable[[str], None] = print) -> GameResult:
+               limit: int | None = None, out: Callable[[str], None] = print,
+               trade_mode: str = DEFAULT_TRADE_MODE) -> GameResult:
     """Play one game with the RL agent in ``seat`` and print its decisions (at most ``limit``)."""
     n = len(opponents) + 1
     if not 0 <= seat < n:
@@ -92,7 +102,7 @@ def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: i
     agents: list[Agent] = []
     for i in range(n):
         if i == seat:
-            agents.append(TracingAgent(policy, on_decision, bot_seed(seed, i), deterministic))
+            agents.append(TracingAgent(policy, on_decision, bot_seed(seed, i), deterministic, trade_mode))
         else:
             agents.append(make_opponent(names.pop(0), bot_seed(seed, i)))
     result, _ = play_game(agents, seed=seed, config=config)
@@ -187,6 +197,8 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--opponents", default="heuristic,heuristic,heuristic")
         p.add_argument("--seed", type=int, default=0, help="game seed (first game seed for 'value')")
         p.add_argument("--max-rounds", type=int, default=None)
+        p.add_argument("--trade-mode", choices=sorted(TRADE_MODES), default=None,
+                       help="how the RL seat trades (default: the mode the checkpoint was trained in)")
     game, value = sub.choices["game"], sub.choices["value"]
     game.add_argument("--seat", type=int, default=0, help="seat of the RL agent")
     game.add_argument("--deterministic", action="store_true", help="always take the most likely action")
@@ -201,14 +213,16 @@ def main(argv: list[str] | None = None) -> None:
             ap.error(f"unknown bot {name!r}; choose from {sorted(OPPONENTS)}")
     if not 1 <= len(opponents) <= 3:
         ap.error("give 1 to 3 opponents")
-    net, _ = load_policy(args.policy, args.seed)
+    net, meta = load_policy(args.policy, args.seed)
+    trade_mode = resolve_trade_mode(args.trade_mode, meta)
     config = GameConfig() if args.max_rounds is None else GameConfig(max_rounds=args.max_rounds)
     if args.command == "game":
         trace_game(NumpyPolicy.from_net(net), opponents, args.seed, args.seat, args.deterministic,
-                   config, args.limit)
+                   config, args.limit, trade_mode=trade_mode)
     else:
         with RolloutPool(args.workers) as pool:
-            rollouts = pool.collect(net, schedule(opponents, args.games, args.seed, rotate=True), config)
+            rollouts = pool.collect(net, schedule(opponents, args.games, args.seed, rotate=True), config,
+                                    trade_mode=trade_mode)
         print(format_value_report(value_report(rollouts)))
 
 

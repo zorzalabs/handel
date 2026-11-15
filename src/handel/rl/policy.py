@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import random
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -162,6 +162,29 @@ def random_policy(seed: int, cfg: PolicyConfig | None = None) -> PolicyNet:
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         return PolicyNet(cfg).eval()
+
+
+def widen_inputs(net: PolicyNet, obs_size: int) -> PolicyNet:
+    """A copy of ``net`` that takes ``obs_size`` inputs (more than before).
+
+    The weights of the new input columns start at 0, so the copy gives exactly
+    the same outputs as ``net`` until training moves them. This is how a
+    checkpoint trained without the trade hint features continues with them.
+    """
+    old = net.cfg.obs_size
+    if obs_size == old:
+        return net
+    if obs_size < old:
+        raise ValueError(f"cannot shrink a network from {old} to {obs_size} inputs")
+    wide = PolicyNet(replace(net.cfg, obs_size=obs_size))
+    state = {k: v.clone() for k, v in net.state_dict().items()}
+    # The layers that read the observation: the first trunk layer, or both heads without a trunk.
+    first = ["trunk.0.weight"] if net.cfg.hidden else ["policy_head.weight", "value_head.weight"]
+    for key in first:
+        w = state[key]
+        state[key] = torch.cat([w, torch.zeros(w.shape[0], obs_size - old, dtype=w.dtype)], dim=1)
+    wide.load_state_dict(state)
+    return wide.eval()
 
 
 def save_checkpoint(net: PolicyNet, path: str | Path, meta: dict | None = None,

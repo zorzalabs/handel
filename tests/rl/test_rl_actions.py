@@ -28,8 +28,9 @@ def test_every_unreserved_index_round_trips_by_type():
 def test_reserved_indices_and_parametric_actions_have_no_mapping():
     for i in range(A.COUNTER_HEURISTIC, A.NUM_ACTIONS):
         with pytest.raises(ValueError):
-            A.from_index(i, _FakeState())
-        assert "reserved" in A.describe(i)
+            A.from_index(i, _FakeState())  # 108 needs its counteroffer, 109+ are reserved
+        assert ("reserved" in A.describe(i)) == (i >= A.PROPOSE_START)
+    assert A.describe(A.COUNTER_HEURISTIC) == "CounterHeuristic"
     with pytest.raises(ValueError):
         A.to_index(ProposeTrade(TradeOffer(0, 1, give_cash=10)))
     with pytest.raises(ValueError):

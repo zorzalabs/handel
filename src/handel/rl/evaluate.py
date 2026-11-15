@@ -16,6 +16,11 @@ worth. The share of such "turn_cap" endings is reported separately.
 
 ``random-policy`` means a freshly initialised network (weights from
 ``--policy-seed``), the untrained baseline.
+
+``--trade-mode`` says how the RL seat trades (``trade.py``). Left out, a
+checkpoint plays in the mode it was trained in (saved in the checkpoint;
+``"heuristic"`` for checkpoints from before Phase 11). The summary also counts
+how the RL seat answered the offers it got.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from ..engine.state import GameConfig
 from .opponents import OPPONENTS
 from .policy import PolicyNet, load_checkpoint, random_policy
 from .rollout import RL, GameRollout, GameSpec, collect
+from .trade import DEFAULT_TRADE_MODE, TRADE_MODES
 
 RANDOM_POLICY = "random-policy"
 
@@ -100,6 +106,8 @@ def summarize(rollouts: list[GameRollout], who: str = RL) -> dict:
     n_games = len(rollouts)
     reasons = Counter(g.end_reason for g in rollouts)
     n_players = len(rollouts[0].lineup) if rollouts else 0
+    accepted, rejected, countered = (sum(g.rl_answers[k] for g in rollouts) for k in range(3))
+    offers = accepted + rejected + countered
     return {
         "games": n_games,
         "seeds": len(by_seed),
@@ -112,6 +120,9 @@ def summarize(rollouts: list[GameRollout], who: str = RL) -> dict:
         "end_reasons": dict(reasons),
         "turn_cap_share": reasons.get("turn_cap", 0) / n_games if n_games else None,
         "rl_decisions_per_game": sum(g.rl_decisions for g in rollouts) / n_games if n_games else None,
+        # Offers the "rl" seats had to answer, whoever decided (the network or the heuristic).
+        "trade_answers": {"offers": offers, "offers_per_game": offers / n_games if n_games else None,
+                          "accepted": accepted, "rejected": rejected, "countered": countered},
         "win_rate_by_seat": seat_rows,
         "opponent_win_rate_per_seat": {k: opp_wins[k] / opp_seats[k] for k in sorted(opp_seats)},
     }
@@ -125,8 +136,22 @@ def _git_commit() -> str | None:
         return None
 
 
-def default_out(policy_arg: str, opponents: list[str], games: int, seed: int) -> Path:
-    tag = f"vs_{'-'.join(opponents)}_n{games}_s{seed}.json"
+def resolve_trade_mode(given: str | None, meta: dict) -> str:
+    """The mode asked for on the command line, else the one the checkpoint was trained in."""
+    mode = given or meta.get("trade_mode") or DEFAULT_TRADE_MODE
+    if mode not in TRADE_MODES:
+        raise ValueError(f"unknown trade mode {mode!r}; choose from {sorted(TRADE_MODES)}")
+    return mode
+
+
+def mode_tag(trade_mode: str) -> str:
+    """File name suffix, empty for the Phase 8 to 10 mode so that older file names stay the same."""
+    return "" if trade_mode == DEFAULT_TRADE_MODE else f"_{trade_mode}"
+
+
+def default_out(policy_arg: str, opponents: list[str], games: int, seed: int,
+                trade_mode: str = DEFAULT_TRADE_MODE) -> Path:
+    tag = f"vs_{'-'.join(opponents)}_n{games}_s{seed}{mode_tag(trade_mode)}.json"
     if policy_arg == RANDOM_POLICY:
         return Path("runs") / "baselines" / f"{RANDOM_POLICY}_{tag}"
     ck = Path(policy_arg)
@@ -147,12 +172,21 @@ def format_report(s: dict, label: str) -> str:
         f"  avg net worth   {est(s['avg_net_worth'], False)}",
         f"  avg rounds      {s['avg_rounds']:.1f}; end reasons {s['end_reasons']}",
         f"  RL decisions per game {s['rl_decisions_per_game']:.1f}",
+        _answers_line(s.get("trade_answers")),
         "  win rate by RL seat: " + ", ".join(
             f"seat {k} {v['win_rate']:.1%}" for k, v in s["win_rate_by_seat"].items()),
         "  opponent win rate per seat: " + ", ".join(
             f"{k} {v:.1%}" for k, v in s["opponent_win_rate_per_seat"].items()),
     ]
     return "\n".join(lines)
+
+
+def _answers_line(a: dict | None) -> str:
+    if not a or not a["offers"]:
+        return "  offers answered: none"
+    n = a["offers"]
+    return (f"  offers answered: {a['offers_per_game']:.2f} per game; accepted {a['accepted'] / n:.1%}, "
+            f"rejected {a['rejected'] / n:.1%}, countered {a['countered'] / n:.1%} of {n}")
 
 
 def load_policy(arg: str, policy_seed: int) -> tuple[PolicyNet, dict]:
@@ -174,6 +208,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--policy-seed", type=int, default=None,
                     help=f"weight seed for '{RANDOM_POLICY}' (default: --seed)")
     ap.add_argument("--deterministic", action="store_true", help="argmax instead of sampling")
+    ap.add_argument("--trade-mode", choices=sorted(TRADE_MODES), default=None,
+                    help="how the RL seat trades (default: the mode the checkpoint was trained in)")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--max-rounds", type=int, default=None)
     ap.add_argument("--out", default=None, help="JSON summary path (default: next to the checkpoint, "
@@ -188,6 +224,7 @@ def main(argv: list[str] | None = None) -> None:
         ap.error("the RL encoder supports 2 to 4 players: give 1 to 3 opponents")
     policy_seed = args.seed if args.policy_seed is None else args.policy_seed
     net, meta = load_policy(args.policy, policy_seed)
+    trade_mode = resolve_trade_mode(args.trade_mode, meta)
     config = GameConfig()
     if args.max_rounds is not None:
         config = replace(config, max_rounds=args.max_rounds)
@@ -195,14 +232,15 @@ def main(argv: list[str] | None = None) -> None:
     specs = schedule(opponents, args.games, args.seed, args.rotate)
     t0 = time.perf_counter()
     rollouts = collect(net, specs, config, workers=args.workers, deterministic=args.deterministic,
-                       record=False)
+                       record=False, trade_mode=trade_mode)
     wall = time.perf_counter() - t0
     s = summarize(rollouts)
     label = args.policy if args.policy == RANDOM_POLICY else Path(args.policy).name
-    print(format_report(s, label))
+    print(format_report(s, f"{label} (trade mode {trade_mode})"))
     print(f"  wall time {wall:.1f}s ({len(rollouts) / wall:.1f} games/s)")
 
-    out = Path(args.out) if args.out else default_out(args.policy, opponents, len(specs), args.seed)
+    out = Path(args.out) if args.out else default_out(args.policy, opponents, len(specs), args.seed,
+                                                      trade_mode)
     out.parent.mkdir(parents=True, exist_ok=True)
     doc = {
         "policy": meta,
@@ -210,6 +248,7 @@ def main(argv: list[str] | None = None) -> None:
         "rotate": args.rotate,
         "first_seed": args.seed,
         "deterministic": args.deterministic,
+        "trade_mode": trade_mode,
         "max_rounds": config.max_rounds,
         "git_commit": _git_commit(),
         "wall_time_s": round(wall, 2),

@@ -16,6 +16,9 @@ probability, value estimate and net worth share, grouped per (game, seat).
 When the game ends, each RL seat's trajectory gets the outcome (won, final
 rank, net worth).
 
+``trade_mode`` says who answers offers and who proposes trades for the RL and
+snapshot seats (see ``trade.py``). The default is the Phase 8 to 10 behaviour.
+
 Games run in parallel with ``multiprocessing`` (like ``runner.simulate_many``).
 Every game is seeded from its own game seed only, so results do not depend on
 the number of workers or on how games are split between them.
@@ -52,6 +55,7 @@ from .observation import OBS_SIZE
 from .opponents import make_opponent
 from .policy import NumpyPolicy, PolicyConfig, PolicyNet, numpy_weights
 from .snapshots import is_snapshot, load_snapshot
+from .trade import DEFAULT_TRADE_MODE
 
 RL = "rl"
 
@@ -97,6 +101,8 @@ class GameRollout:
     net_worth: list[int]
     rl_decisions: int  # decisions sent to the network, all "rl" seats together (not snapshots)
     trajectories: list[SeatTrajectory] = field(default_factory=list)  # empty unless recording
+    # Offers the "rl" seats accepted, rejected and countered (whoever decided: network or heuristic).
+    rl_answers: tuple[int, int, int] = (0, 0, 0)
 
     def summary(self) -> dict:
         d = asdict(self)
@@ -105,8 +111,8 @@ class GameRollout:
         return d
 
 
-def _empty_trajectory(seat: int) -> SeatTrajectory:
-    return SeatTrajectory(seat, np.zeros((0, OBS_SIZE), np.float32), np.zeros((0, NUM_ACTIONS), bool),
+def _empty_trajectory(seat: int, obs_size: int = OBS_SIZE) -> SeatTrajectory:
+    return SeatTrajectory(seat, np.zeros((0, obs_size), np.float32), np.zeros((0, NUM_ACTIONS), bool),
                           np.zeros(0, np.int64), np.zeros(0, np.float32), np.zeros(0, np.float32),
                           np.zeros(0, np.int8), np.zeros(0, np.float32))
 
@@ -114,7 +120,7 @@ def _empty_trajectory(seat: int) -> SeatTrajectory:
 def _trajectory(agent: RLAgent, seat: int) -> SeatTrajectory:
     st = agent.steps
     if not st:
-        return _empty_trajectory(seat)
+        return _empty_trajectory(seat, agent.policy.cfg.obs_size)
     return SeatTrajectory(
         seat=seat,
         obs=np.stack([x.obs for x in st]),
@@ -129,28 +135,33 @@ def _trajectory(agent: RLAgent, seat: int) -> SeatTrajectory:
 
 def play_rollout(policy: PolicyNet | NumpyPolicy, spec: GameSpec, config: GameConfig | None = None,
                  deterministic: bool = False, record: bool = True,
-                 snapshot_dir: str | None = None) -> GameRollout:
+                 snapshot_dir: str | None = None, trade_mode: str = DEFAULT_TRADE_MODE) -> GameRollout:
     """Play one game. RL seat ``i`` samples with seed ``bot_seed(spec.seed, i)``.
 
     ``snapshot_dir`` is the folder that ``"snap:..."`` seats are loaded from.
+    RL and snapshot seats all trade the way ``trade_mode`` says.
     """
     agents: list[Agent] = []
     for i, name in enumerate(spec.lineup):
         sd = bot_seed(spec.seed, i)
         if name == RL:
-            agents.append(RLAgent(policy, seed=sd, deterministic=deterministic, record=record))
+            agents.append(RLAgent(policy, seed=sd, deterministic=deterministic, trade_mode=trade_mode,
+                                  record=record))
         elif is_snapshot(name):
             if snapshot_dir is None:
                 raise ValueError(f"lineup has {name!r} but no snapshot folder was given")
-            agents.append(RLAgent(load_snapshot(snapshot_dir, name), seed=sd, name=name))
+            agents.append(RLAgent(load_snapshot(snapshot_dir, name), seed=sd, trade_mode=trade_mode,
+                                  name=name))
         else:
             agents.append(make_opponent(name, sd))
     result, _ = play_game(agents, seed=spec.seed, config=config)
     ranks = placements({"lineup": spec.lineup, "bankrupt_order": result.bankrupt_order,
                         "winner_seat": result.winner, "net_worth": result.net_worth})
+    learners = [a for a, name in zip(agents, spec.lineup) if name == RL]
     out = GameRollout(spec.game_id, spec.seed, spec.lineup, result.winner, result.end_reason,
                       result.rounds, result.turns, ranks, result.net_worth,
-                      sum(a.decisions for a, name in zip(agents, spec.lineup) if name == RL))
+                      sum(a.decisions for a in learners),
+                      rl_answers=tuple(sum(a.answers[k] for a in learners) for k in range(3)))
     if record:
         total = sum(result.net_worth)
         for i, a in enumerate(agents):
@@ -184,13 +195,13 @@ def _build_policy(cfg: dict, weights: dict[str, np.ndarray], fast: bool) -> Poli
 
 
 def _run_chunk(args: tuple[int, bytes, list[GameSpec], GameConfig | None, bool, bool,
-                           str | None]) -> list[GameRollout]:
+                           str | None, str]) -> list[GameRollout]:
     global _worker_cache
-    version, payload, specs, config, deterministic, record, snapshot_dir = args
+    version, payload, specs, config, deterministic, record, snapshot_dir, trade_mode = args
     if _worker_cache is None or _worker_cache[0] != version:
         _worker_cache = (version, _build_policy(*pickle.loads(payload)))
     policy = _worker_cache[1]
-    return [play_rollout(policy, sp, config, deterministic, record, snapshot_dir) for sp in specs]
+    return [play_rollout(policy, sp, config, deterministic, record, snapshot_dir, trade_mode) for sp in specs]
 
 
 @contextmanager
@@ -232,7 +243,7 @@ class RolloutPool:
 
     def collect(self, policy: PolicyNet, specs: Sequence[GameSpec], config: GameConfig | None = None,
                 deterministic: bool = False, record: bool = True,
-                snapshot_dir: str | None = None) -> list[GameRollout]:
+                snapshot_dir: str | None = None, trade_mode: str = DEFAULT_TRADE_MODE) -> list[GameRollout]:
         """Play every spec with the current weights of ``policy``. Results come back in spec order.
 
         Snapshot seats are loaded from ``snapshot_dir`` by each worker when first needed.
@@ -241,7 +252,8 @@ class RolloutPool:
         if self.workers == 1 or len(specs) < 2 * self.workers:
             local = NumpyPolicy.from_net(policy) if self.fast else policy
             with single_thread():
-                return [play_rollout(local, sp, config, deterministic, record, snapshot_dir) for sp in specs]
+                return [play_rollout(local, sp, config, deterministic, record, snapshot_dir, trade_mode)
+                        for sp in specs]
         if self._executor is None:
             self._executor = ProcessPoolExecutor(max_workers=self.workers, mp_context=mp.get_context("spawn"),
                                                  initializer=_init_worker)
@@ -251,8 +263,8 @@ class RolloutPool:
         payload = pickle.dumps((asdict(policy.cfg), numpy_weights(policy), self.fast),
                                protocol=pickle.HIGHEST_PROTOCOL)
         size = max(1, -(-len(specs) // (self.workers * 4)))
-        chunks = [(self._version, payload, specs[i:i + size], config, deterministic, record, snapshot_dir)
-                  for i in range(0, len(specs), size)]
+        chunks = [(self._version, payload, specs[i:i + size], config, deterministic, record, snapshot_dir,
+                   trade_mode) for i in range(0, len(specs), size)]
         out: list[GameRollout] = []
         for part in self._executor.map(_run_chunk, chunks):
             out.extend(part)
@@ -261,7 +273,7 @@ class RolloutPool:
 
 def collect(policy: PolicyNet, specs: Sequence[GameSpec], config: GameConfig | None = None,
             workers: int | None = None, deterministic: bool = False,
-            record: bool = True) -> list[GameRollout]:
+            record: bool = True, trade_mode: str = DEFAULT_TRADE_MODE) -> list[GameRollout]:
     """Play every spec once with a temporary pool (torch policy in the workers, as in Phase 8)."""
     with RolloutPool(workers, fast=False) as pool:
-        return pool.collect(policy, specs, config, deterministic, record)
+        return pool.collect(policy, specs, config, deterministic, record, trade_mode=trade_mode)
