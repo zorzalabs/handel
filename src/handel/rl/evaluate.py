@@ -20,7 +20,9 @@ worth. The share of such "turn_cap" endings is reported separately.
 ``--trade-mode`` says how the RL seat trades (``trade.py``). Left out, a
 checkpoint plays in the mode it was trained in (saved in the checkpoint;
 ``"heuristic"`` for checkpoints from before Phase 11). The summary also counts
-how the RL seat answered the offers it got.
+how the RL seat answered the offers it got, and the trades it started itself
+(proposals, how many of them were the heuristic bot's pick, and how many
+ended in a deal).
 """
 
 from __future__ import annotations
@@ -108,6 +110,7 @@ def summarize(rollouts: list[GameRollout], who: str = RL) -> dict:
     n_players = len(rollouts[0].lineup) if rollouts else 0
     accepted, rejected, countered = (sum(g.rl_answers[k] for g in rollouts) for k in range(3))
     offers = accepted + rejected + countered
+    proposed, picks, deals, own_counters = (sum(g.rl_trades[k] for g in rollouts) for k in range(4))
     return {
         "games": n_games,
         "seeds": len(by_seed),
@@ -123,6 +126,12 @@ def summarize(rollouts: list[GameRollout], who: str = RL) -> dict:
         # Offers the "rl" seats had to answer, whoever decided (the network or the heuristic).
         "trade_answers": {"offers": offers, "offers_per_game": offers / n_games if n_games else None,
                           "accepted": accepted, "rejected": rejected, "countered": countered},
+        # Trades the "rl" seats started (by the network in "full" mode, by the heuristic bot on
+        # their behalf in "respond" and "heuristic_propose" mode).
+        "trade_proposals": {"proposals": proposed, "proposals_per_game": proposed / n_games if n_games else None,
+                            "heuristic_picks": picks, "deals": deals,
+                            "deals_per_game": deals / n_games if n_games else None,
+                            "own_counters": own_counters},
         "win_rate_by_seat": seat_rows,
         "opponent_win_rate_per_seat": {k: opp_wins[k] / opp_seats[k] for k in sorted(opp_seats)},
     }
@@ -173,6 +182,7 @@ def format_report(s: dict, label: str) -> str:
         f"  avg rounds      {s['avg_rounds']:.1f}; end reasons {s['end_reasons']}",
         f"  RL decisions per game {s['rl_decisions_per_game']:.1f}",
         _answers_line(s.get("trade_answers")),
+        _proposals_line(s.get("trade_proposals")),
         "  win rate by RL seat: " + ", ".join(
             f"seat {k} {v['win_rate']:.1%}" for k, v in s["win_rate_by_seat"].items()),
         "  opponent win rate per seat: " + ", ".join(
@@ -187,6 +197,15 @@ def _answers_line(a: dict | None) -> str:
     n = a["offers"]
     return (f"  offers answered: {a['offers_per_game']:.2f} per game; accepted {a['accepted'] / n:.1%}, "
             f"rejected {a['rejected'] / n:.1%}, countered {a['countered'] / n:.1%} of {n}")
+
+
+def _proposals_line(t: dict | None) -> str:
+    if not t or not t["proposals"]:
+        return "  trades proposed: none" + (f"; own counteroffers {t['own_counters']}" if t and t["own_counters"] else "")
+    n = t["proposals"]
+    return (f"  trades proposed: {t['proposals_per_game']:.2f} per game ({t['heuristic_picks'] / n:.1%} the "
+            f"heuristic bot's pick); deals {t['deals_per_game']:.2f} per game ({t['deals'] / n:.1%} of the "
+            f"proposals); own counteroffers {t['own_counters']}")
 
 
 def load_policy(arg: str, policy_seed: int) -> tuple[PolicyNet, dict]:
@@ -225,6 +244,9 @@ def main(argv: list[str] | None = None) -> None:
     policy_seed = args.seed if args.policy_seed is None else args.policy_seed
     net, meta = load_policy(args.policy, policy_seed)
     trade_mode = resolve_trade_mode(args.trade_mode, meta)
+    if TRADE_MODES[trade_mode].policy_proposes and not net.has_scorer:
+        ap.error(f"trade mode {trade_mode!r} needs a checkpoint with the candidate scorer (trained in "
+                 "that mode); this one has none")
     config = GameConfig()
     if args.max_rounds is not None:
         config = replace(config, max_rounds=args.max_rounds)

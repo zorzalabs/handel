@@ -2,12 +2,21 @@
 
     uv run python -m handel.rl.debug game runs/<id>/best.pt --opponents always_buy,always_buy,always_buy --seed 3
     uv run python -m handel.rl.debug value runs/<id>/best.pt --opponents heuristic,heuristic,heuristic --games 200
+    uv run python -m handel.rl.debug record runs/<id>/best.pt --opponents heuristic,heuristic,heuristic --seed 3
 
 ``game`` plays one game and prints every decision the network made: the round,
 the phase, the agent's cash and share of all net worth, the value estimate,
 the three most likely actions with their probabilities, and the action taken.
 When the network answers a trade offer (``--trade-mode respond``), the line
-also shows the offer.
+also shows the offer. In ``full`` mode a line also says how many trade
+candidates the network could choose from, and a candidate among the likely
+or chosen actions is written out.
+
+``record`` plays one game and saves a full game record (the format of
+``handel-play``), so that ``handel-export`` can turn it into a replay for the
+web viewer::
+
+    uv run handel-export runs/<id>/records/game_3.json
 
 ``value`` plays many games and checks the value head. The estimate should be
 higher in positions where the agent is clearly ahead than where it is clearly
@@ -17,7 +26,10 @@ behind, and higher in games it went on to win than in games it lost.
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Callable
+from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 
@@ -27,8 +39,10 @@ from ..engine.board import BOARD
 from ..engine.state import GameConfig, GameState, Phase
 from ..runner import GameResult, bot_seed, play_game
 from ..llm.observation import describe_offer
-from .actions import BUY, COUNTER_HEURISTIC, DECLINE_BUY, describe, from_index
+from ..negotiation import negotiations, summary
+from .actions import BUY, COUNTER_HEURISTIC, DECLINE_BUY, PROPOSE_START, describe, from_index
 from .agent import RLAgent, Step
+from .candidates import Candidate, describe_candidate
 from .evaluate import load_policy, resolve_trade_mode, schedule
 from .opponents import OPPONENTS, make_opponent
 from .policy import NumpyPolicy
@@ -43,9 +57,11 @@ MIN_BUCKET = 30  # decisions needed in a bucket before the value check judges it
 
 
 class TracingAgent(RLAgent):
-    """An ``RLAgent`` that calls ``on_decision(state, player, step)`` after every network decision."""
+    """An ``RLAgent`` that calls ``on_decision(state, player, step, candidates)`` after every
+    network decision (``candidates`` are the trade candidates it could choose from)."""
 
-    def __init__(self, policy: NumpyPolicy, on_decision: Callable[[GameState, int, Step], None],
+    def __init__(self, policy: NumpyPolicy,
+                 on_decision: Callable[[GameState, int, Step, list[Candidate]], None],
                  seed: int = 0, deterministic: bool = False, trade_mode: str = DEFAULT_TRADE_MODE) -> None:
         super().__init__(policy, seed=seed, deterministic=deterministic, trade_mode=trade_mode, record=True)
         self.on_decision = on_decision
@@ -54,32 +70,42 @@ class TracingAgent(RLAgent):
         before = len(self.steps)
         action = super().choose(state, player, legal)
         if len(self.steps) > before:  # the network decided (not a forced move, not the heuristic)
-            self.on_decision(state, player, self.steps[-1])
+            self.on_decision(state, player, self.steps[-1], self.last_candidates)
         return action
 
 
-def action_name(i: int, state: GameState) -> str:
+def action_name(i: int, state: GameState, candidates: list[Candidate] | None = None) -> str:
     """Action index as text, with the city name instead of the board position."""
     if i in (BUY, DECLINE_BUY):
         return f"{describe(i)} {BOARD[state.pending_buy].name}"
     if i == COUNTER_HEURISTIC:
         return describe(i)
+    if i >= PROPOSE_START:
+        k = i - PROPOSE_START
+        if candidates is None or k >= len(candidates):
+            return describe(i)
+        verb = "Counter" if candidates[k].counter else "Propose"
+        return f"{verb} [{describe_candidate(candidates[k])}]"
     a = from_index(i, state)
     pos = getattr(a, "pos", None)
     return describe(i) if pos is None else f"{type(a).__name__} {BOARD[pos].name}"
 
 
-def decision_line(policy: NumpyPolicy, state: GameState, player: int, step: Step, top: int = 3) -> str:
-    legal, logp, _ = policy.distribution(step.obs, step.mask)
+def decision_line(policy: NumpyPolicy, state: GameState, player: int, step: Step, top: int = 3,
+                  candidates: list[Candidate] | None = None) -> str:
+    legal, logp, _ = policy.distribution(step.obs, step.mask, step.cands)
     order = np.argsort(-logp)[:top]
-    best = ", ".join(f"{action_name(int(legal[k]), state)} {np.exp(logp[k]):.0%}" for k in order)
+    best = ", ".join(f"{action_name(int(legal[k]), state, candidates)} {np.exp(logp[k]):.0%}" for k in order)
     more = f" (+{len(legal) - top} more)" if len(legal) > top else ""
     offer = ""
     if step.phase == Phase.TRADE_RESPONSE and state.trade is not None:
         offer = f" | offer: {describe_offer(state.trade, viewer=player)}"
+    if step.cands is not None:
+        p_trade = float(np.exp(logp[legal >= PROPOSE_START]).sum())
+        offer += f" | {len(step.cands)} trade candidates, {p_trade:.0%} in total"
     return (f"round {state.round:3d} {Phase(step.phase).name:<11} cash {state.players[player].cash:5d} "
             f"share {step.share:4.0%} value {step.value:+.2f} | {best}{more} -> "
-            f"{action_name(step.action, state)}{offer}")
+            f"{action_name(step.action, state, candidates)}{offer}")
 
 
 def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: int = 0,
@@ -92,10 +118,10 @@ def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: i
         raise ValueError(f"seat must be 0 to {n - 1}")
     shown = 0
 
-    def on_decision(state: GameState, player: int, step: Step) -> None:
+    def on_decision(state: GameState, player: int, step: Step, candidates: list[Candidate]) -> None:
         nonlocal shown
         if limit is None or shown < limit:
-            out(decision_line(policy, state, player, step))
+            out(decision_line(policy, state, player, step, candidates=candidates))
         shown += 1
 
     names = list(opponents)
@@ -113,6 +139,32 @@ def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: i
         f" ({'the RL agent' if result.winner == seat else agents[result.winner].name});"
         f" lineup [{lineup}], final net worth {result.net_worth}, {shown} RL decisions")
     return result
+
+
+def record_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: int = 0,
+                deterministic: bool = False, config: GameConfig | None = None,
+                trade_mode: str = DEFAULT_TRADE_MODE, label: str = "RL agent") -> dict:
+    """Play one game with the RL agent in ``seat`` and return its record for ``handel-export``."""
+    n = len(opponents) + 1
+    if not 0 <= seat < n:
+        raise ValueError(f"seat must be 0 to {n - 1}")
+    names = list(opponents)
+    agents: list[Agent] = []
+    seats = []
+    for i in range(n):
+        if i == seat:
+            agents.append(RLAgent(policy, bot_seed(seed, i), deterministic, trade_mode))
+            seats.append({"name": label, "type": "bot", "bot": f"rl ({trade_mode})"})
+        else:
+            name = names.pop(0)
+            agents.append(make_opponent(name, bot_seed(seed, i)))
+            seats.append({"name": f"{name} (P{i})", "type": "bot", "bot": name})
+    cfg = config or GameConfig()
+    result, state = play_game(agents, seed=seed, config=cfg, record=True)
+    negs = negotiations(state.log or [])
+    return {"seed": seed, "config": {"game": asdict(cfg), "seats": seats}, "result": result.to_dict(),
+            "rl_seat": seat, "trade_mode": trade_mode, "negotiation_summary": summary(negs),
+            "negotiations": negs, "transcripts": {}, "log": state.log}
 
 
 # --- Value head check -------------------------------------------------------------------
@@ -191,7 +243,8 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Look at what a trained policy does.")
     sub = ap.add_subparsers(dest="command", required=True)
     for name, text in (("game", "print every RL decision of one game"),
-                       ("value", "check the value head on many games")):
+                       ("value", "check the value head on many games"),
+                       ("record", "save one game as a record for handel-export and the viewer")):
         p = sub.add_parser(name, help=text)
         p.add_argument("policy", help="checkpoint path, or 'random-policy' for untrained weights")
         p.add_argument("--opponents", default="heuristic,heuristic,heuristic")
@@ -199,10 +252,13 @@ def main(argv: list[str] | None = None) -> None:
         p.add_argument("--max-rounds", type=int, default=None)
         p.add_argument("--trade-mode", choices=sorted(TRADE_MODES), default=None,
                        help="how the RL seat trades (default: the mode the checkpoint was trained in)")
-    game, value = sub.choices["game"], sub.choices["value"]
-    game.add_argument("--seat", type=int, default=0, help="seat of the RL agent")
-    game.add_argument("--deterministic", action="store_true", help="always take the most likely action")
+    game, value, record = sub.choices["game"], sub.choices["value"], sub.choices["record"]
+    for p in (game, record):
+        p.add_argument("--seat", type=int, default=0, help="seat of the RL agent")
+        p.add_argument("--deterministic", action="store_true", help="always take the most likely action")
     game.add_argument("--limit", type=int, default=None, help="print at most this many decisions")
+    record.add_argument("--out", default=None, help="record file (default: records/game_<seed>.json "
+                        "next to the checkpoint)")
     value.add_argument("--games", type=int, default=200)
     value.add_argument("--workers", type=int, default=None)
     args = ap.parse_args(argv)
@@ -216,9 +272,26 @@ def main(argv: list[str] | None = None) -> None:
     net, meta = load_policy(args.policy, args.seed)
     trade_mode = resolve_trade_mode(args.trade_mode, meta)
     config = GameConfig() if args.max_rounds is None else GameConfig(max_rounds=args.max_rounds)
+    if TRADE_MODES[trade_mode].policy_proposes and not net.has_scorer:
+        ap.error(f"trade mode {trade_mode!r} needs a checkpoint with the candidate scorer")
     if args.command == "game":
         trace_game(NumpyPolicy.from_net(net), opponents, args.seed, args.seat, args.deterministic,
                    config, args.limit, trade_mode=trade_mode)
+    elif args.command == "record":
+        ck = Path(args.policy)
+        doc = record_game(NumpyPolicy.from_net(net), opponents, args.seed, args.seat, args.deterministic,
+                          config, trade_mode, label=f"RL agent ({ck.parent.name or ck.stem})")
+        out = Path(args.out) if args.out else (ck.parent if ck.suffix == ".pt" else Path("runs/baselines")) \
+            / "records" / f"game_{args.seed}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+        mine = [n for n in doc["negotiations"] if n["between"][0] == args.seat]
+        res = doc["result"]
+        print(f"seed {args.seed}: seat {res['winner']} won after {res['rounds']} rounds ({res['end_reason']}); "
+              f"the RL agent (seat {args.seat}) opened {len(mine)} negotiations, "
+              f"{sum(n['outcome'] == 'accepted' for n in mine)} ended in a deal; "
+              f"{doc['negotiation_summary']['negotiations']} negotiations in the game")
+        print(f"saved {out}; make the replay with: uv run handel-export {out}")
     else:
         with RolloutPool(args.workers) as pool:
             rollouts = pool.collect(net, schedule(opponents, args.games, args.seed, rotate=True), config,

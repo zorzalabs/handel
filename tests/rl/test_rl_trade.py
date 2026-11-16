@@ -89,10 +89,11 @@ class PickPolicy:
 # --- Modes --------------------------------------------------------------------------------
 
 
-def test_the_four_trade_modes():
-    table = {name: (m.policy_answers, m.heuristic_proposes) for name, m in TRADE_MODES.items()}
-    assert table == {"heuristic": (False, False), "heuristic_propose": (False, True),
-                     "respond_only": (True, False), "respond": (True, True)}
+def test_the_five_trade_modes():
+    table = {name: (m.policy_answers, m.heuristic_proposes, m.policy_proposes) for name, m in TRADE_MODES.items()}
+    assert table == {"heuristic": (False, False, False), "heuristic_propose": (False, True, False),
+                     "respond_only": (True, False, False), "respond": (True, True, False),
+                     "full": (True, False, True)}
     assert get_trade_mode("respond").name == "respond"
     with pytest.raises(ValueError, match="trade_mode must be one of"):
         get_trade_mode("network")

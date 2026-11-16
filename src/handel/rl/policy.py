@@ -12,6 +12,26 @@ Two ways to run the same weights:
 * ``NumpyPolicy``: plain numpy, one observation at a time. Rollout workers use
   it because a single forward pass is about 2.5x faster than through torch.
 
+**Trade candidates (Phase 12).** A network with ``cand_features`` above 0 also
+has a *candidate scorer*. It gives every trade candidate of a decision
+(``candidates.py``) one score, from the state embedding (the trunk's output)
+and the candidate's feature row::
+
+    score = w . tanh(A . embedding + B . features + b) + skip . features + bias
+
+"Make no trade" has the fixed score 0, so the chance of making candidate k is
+``exp(score_k) / (1 + sum of exp(score_j))``. The rest of the probability is
+split over the normal actions exactly as the policy head says. In code that
+is one masked softmax over ``[log probabilities of the normal actions,
+candidate scores]``. A decision without candidates is the plain masked
+softmax of before, so such a network plays the older trade modes unchanged.
+
+The scorer starts by hand, not at random: ``propose_bias`` (negative) is the
+starting score of every candidate, and ``pick_bias`` is added for the
+candidate that the heuristic bot would propose (through the ``skip`` weights).
+A fresh scorer therefore proposes what the heuristic bot would, like the
+Phase 11 agent, and tries the other candidates now and then.
+
 Checkpoints are plain ``torch.save`` dicts::
 
     {"format": 1, "policy": {"obs_size": ..., "num_actions": ..., "hidden": [...]},
@@ -29,7 +49,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from .actions import END, NUM_ACTIONS
+from .actions import END, NUM_ACTIONS, NUM_PROPOSE_SLOTS, PROPOSE_START
+from .candidates import CAND_FEATURES, F_PICK
 from .observation import OBS_SIZE
 
 MASKED_LOGIT = -1e9
@@ -42,6 +63,11 @@ class PolicyConfig:
     num_actions: int = NUM_ACTIONS
     hidden: list[int] = field(default_factory=lambda: [256, 256])
     end_turn_bias: float = 0.0  # starting bias of the EndTurn logit (only used at init)
+    cand_features: int = 0  # features per trade candidate; 0 = no candidate scorer (before Phase 12)
+    cand_hidden: int = 64  # hidden units of the candidate scorer
+    max_candidates: int = NUM_PROPOSE_SLOTS  # candidates offered per decision (at most the number of slots)
+    propose_bias: float = 0.0  # starting score of every candidate; "no trade" is 0 (only used at init)
+    pick_bias: float = 0.0  # added to the starting score of the heuristic bot's pick (only used at init)
 
 
 def _layer(n_in: int, n_out: int, gain: float) -> nn.Linear:
@@ -68,20 +94,75 @@ class PolicyNet(nn.Module):
         if self.cfg.end_turn_bias:
             with torch.no_grad():
                 self.policy_head.bias[END] = self.cfg.end_turn_bias
+        self.has_scorer = self.cfg.cand_features > 0
+        if self.has_scorer:
+            if self.cfg.num_actions != NUM_ACTIONS or not 1 <= self.cfg.max_candidates <= NUM_PROPOSE_SLOTS:
+                raise ValueError(f"a network with a candidate scorer needs {NUM_ACTIONS} actions and "
+                                 f"1 to {NUM_PROPOSE_SLOTS} candidates")
+            f, d = self.cfg.cand_features, self.cfg.cand_hidden
+            self.cand_state = _layer(n, d, float(np.sqrt(2)))  # the state embedding's part of the hidden layer
+            self.cand_in = nn.Linear(f, d, bias=False)  # the candidate's part
+            nn.init.orthogonal_(self.cand_in.weight, float(np.sqrt(2)))
+            self.cand_out = _layer(d, 1, 0.01)  # tiny, so the starting scores are set by the skip weights
+            self.cand_skip = nn.Linear(f, 1)  # straight from the features to the score
+            with torch.no_grad():
+                self.cand_skip.weight.zero_()
+                self.cand_skip.weight[0, F_PICK] = self.cfg.pick_bias
+                self.cand_skip.bias.fill_(self.cfg.propose_bias)
 
-    def forward(self, obs: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Masked logits ``(B, A)`` and values ``(B,)``. Illegal actions get ``MASKED_LOGIT``."""
+    def scores(self, x: torch.Tensor, cands: torch.Tensor) -> torch.Tensor:
+        """Scores ``(B, K)`` of the candidates ``(B, K, F)`` given the state embeddings ``x`` ``(B, H)``."""
+        hidden = torch.tanh(self.cand_state(x).unsqueeze(1) + self.cand_in(cands))
+        return (self.cand_out(hidden) + self.cand_skip(cands)).squeeze(-1)
+
+    def forward(self, obs: torch.Tensor, mask: torch.Tensor,
+                cands: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+                ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Masked logits ``(B, A)`` and values ``(B,)``. Illegal actions get ``MASKED_LOGIT``.
+
+        ``cands`` holds the trade candidates; only a network with a candidate
+        scorer uses it. Two forms give the same result:
+
+        * padded: ``(B, NUM_PROPOSE_SLOTS, F)``, zero rows where there is no
+          candidate (the mask says which slots are real)
+        * packed: ``(rows, owner, slot)`` with only the real candidates,
+          ``rows`` ``(C, F)``, and for each row the batch index of its decision
+          and its slot. Most decisions have no candidates, so this is what
+          the PPO update uses.
+        """
         x = self.trunk(obs)
-        logits = self.policy_head(x).masked_fill(~mask, MASKED_LOGIT)
-        return logits, self.value_head(x).squeeze(-1)
+        logits = self.policy_head(x)
+        value = self.value_head(x).squeeze(-1)
+        if not self.has_scorer:
+            return logits.masked_fill(~mask, MASKED_LOGIT), value
+        # Normal actions as log probabilities (they sum to 1, the weight of "no trade"),
+        # then the candidate scores: one softmax over both gives the two-step choice.
+        normal = torch.log_softmax(logits[:, :PROPOSE_START].masked_fill(~mask[:, :PROPOSE_START], MASKED_LOGIT),
+                                   dim=-1)
+        if cands is None:
+            scores = torch.full((obs.shape[0], NUM_PROPOSE_SLOTS), MASKED_LOGIT, dtype=logits.dtype)
+        elif isinstance(cands, tuple):
+            rows, owner, slot = cands
+            scores = torch.full((obs.shape[0], NUM_PROPOSE_SLOTS), MASKED_LOGIT, dtype=logits.dtype)
+            if len(rows):
+                hidden = torch.tanh(self.cand_state(x)[owner] + self.cand_in(rows))
+                scores[owner, slot] = (self.cand_out(hidden) + self.cand_skip(rows)).squeeze(-1)
+            scores = scores.masked_fill(~mask[:, PROPOSE_START:], MASKED_LOGIT)
+        else:
+            scores = self.scores(x, cands).masked_fill(~mask[:, PROPOSE_START:], MASKED_LOGIT)
+        return torch.cat([normal, scores], dim=1), value
 
     @torch.no_grad()
     def act(self, obs: np.ndarray, mask: np.ndarray, generator: torch.Generator | None = None,
-            deterministic: bool = False) -> tuple[int, float, float]:
-        """Pick one action for a single observation: (index, log probability, value)."""
+            deterministic: bool = False, cands: np.ndarray | None = None) -> tuple[int, float, float]:
+        """Pick one action for a single observation: (index, log probability, value).
+
+        ``cands`` ``(n, F)`` are the feature rows of this decision's trade candidates.
+        """
         o = torch.from_numpy(obs).unsqueeze(0)
         m = torch.from_numpy(mask).unsqueeze(0)
-        logits, value = self.forward(o, m)
+        c = None if cands is None or not self.has_scorer else torch.from_numpy(pad_candidates(cands)).unsqueeze(0)
+        logits, value = self.forward(o, m, c)
         logp = torch.log_softmax(logits[0], dim=-1)
         if deterministic:
             i = int(torch.argmax(logp))
@@ -93,10 +174,11 @@ class PolicyNet(nn.Module):
         """The sampling RNG that ``act`` expects, seeded."""
         return torch.Generator().manual_seed(seed)
 
-    def evaluate(self, obs: torch.Tensor, mask: torch.Tensor,
-                 actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def evaluate(self, obs: torch.Tensor, mask: torch.Tensor, actions: torch.Tensor,
+                 cands: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """What the PPO loss needs for a batch: log prob of ``actions``, entropy, value."""
-        logits, value = self.forward(obs, mask)
+        logits, value = self.forward(obs, mask, cands)
         logp_all = torch.log_softmax(logits, dim=-1)
         logp = logp_all.gather(1, actions.unsqueeze(1)).squeeze(1)
         # Illegal actions have probability exactly 0, so they add nothing to the entropy.
@@ -119,6 +201,12 @@ class NumpyPolicy:
         # One matrix for both heads: rows 0..A-1 are the policy logits, the last row is the value.
         self.head_w = np.concatenate([weights["policy_head.weight"], weights["value_head.weight"]])
         self.head_b = np.concatenate([weights["policy_head.bias"], weights["value_head.bias"]])
+        self.has_scorer = cfg.cand_features > 0
+        if self.has_scorer:
+            self.cand_state = (weights["cand_state.weight"], weights["cand_state.bias"])
+            self.cand_in = weights["cand_in.weight"].T.copy()  # (F, D), so that candidates @ cand_in works
+            self.cand_out = (weights["cand_out.weight"][0], float(weights["cand_out.bias"][0]))
+            self.cand_skip = (weights["cand_skip.weight"][0], float(weights["cand_skip.bias"][0]))
 
     @classmethod
     def from_net(cls, net: PolicyNet) -> NumpyPolicy:
@@ -127,21 +215,39 @@ class NumpyPolicy:
     def make_rng(self, seed: int) -> random.Random:
         return random.Random(seed)
 
-    def distribution(self, obs: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-        """(indices of the legal actions, their log probabilities, value estimate)."""
+    def distribution(self, obs: np.ndarray, mask: np.ndarray,
+                     cands: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, float]:
+        """(indices of the legal actions, their log probabilities, value estimate).
+
+        ``cands`` ``(n, F)`` are the feature rows of the trade candidates; the
+        mask must have exactly the first ``n`` candidate slots switched on.
+        """
         x = obs
         for w, b in self.trunk:
             x = np.tanh(w @ x + b)
         out = self.head_w @ x + self.head_b
-        legal = np.flatnonzero(mask)
+        n = 0 if cands is None or not self.has_scorer else len(cands)
+        if n == 0:
+            legal = np.flatnonzero(mask)
+            z = out[legal]
+            z = z - z.max()
+            return legal, z - np.log(np.exp(z).sum()), float(out[-1])
+        legal = np.flatnonzero(mask[:PROPOSE_START])
         z = out[legal]
         z = z - z.max()
-        return legal, z - np.log(np.exp(z).sum()), float(out[-1])
+        normal = z - np.log(np.exp(z).sum())  # log probabilities of the normal actions
+        w_state, b_state = self.cand_state
+        hidden = np.tanh(cands @ self.cand_in + (w_state @ x + b_state))
+        scores = hidden @ self.cand_out[0] + self.cand_out[1] + cands @ self.cand_skip[0] + self.cand_skip[1]
+        joint = np.concatenate([normal, scores])
+        top = joint.max()
+        logp = joint - (top + np.log(np.exp(joint - top).sum()))
+        return np.concatenate([legal, PROPOSE_START + np.arange(n)]), logp, float(out[-1])
 
     def act(self, obs: np.ndarray, mask: np.ndarray, rng: random.Random | None = None,
-            deterministic: bool = False) -> tuple[int, float, float]:
+            deterministic: bool = False, cands: np.ndarray | None = None) -> tuple[int, float, float]:
         """Pick one action for a single observation: (index, log probability, value)."""
-        legal, logp, value = self.distribution(obs, mask)
+        legal, logp, value = self.distribution(obs, mask, cands)
         if deterministic:
             k = int(logp.argmax())
         else:
@@ -150,6 +256,13 @@ class NumpyPolicy:
             # side="right": an action with probability 0 can never be picked.
             k = min(int(np.searchsorted(cum, u, side="right")), len(legal) - 1)
         return int(legal[k]), float(logp[k]), value
+
+
+def pad_candidates(cands: np.ndarray) -> np.ndarray:
+    """Candidate rows ``(n, F)`` padded with zero rows to ``(NUM_PROPOSE_SLOTS, F)``."""
+    out = np.zeros((NUM_PROPOSE_SLOTS, cands.shape[1]), dtype=np.float32)
+    out[:len(cands)] = cands
+    return out
 
 
 def numpy_weights(net: PolicyNet) -> dict[str, np.ndarray]:
@@ -185,6 +298,25 @@ def widen_inputs(net: PolicyNet, obs_size: int) -> PolicyNet:
         state[key] = torch.cat([w, torch.zeros(w.shape[0], obs_size - old, dtype=w.dtype)], dim=1)
     wide.load_state_dict(state)
     return wide.eval()
+
+
+def add_scorer(net: PolicyNet, seed: int = 0, cand_hidden: int = 64, max_candidates: int = NUM_PROPOSE_SLOTS,
+               propose_bias: float = 0.0, pick_bias: float = 0.0) -> PolicyNet:
+    """A copy of ``net`` with a fresh candidate scorer (weights drawn from ``seed``).
+
+    Everything the network already had keeps its weights, so without trade
+    candidates the copy gives exactly the same outputs as ``net``. This is how
+    a Phase 11 checkpoint continues in ``trade_mode = "full"``.
+    """
+    if net.cfg.cand_features:
+        return net
+    cfg = replace(net.cfg, cand_features=CAND_FEATURES, cand_hidden=cand_hidden, max_candidates=max_candidates,
+                  propose_bias=propose_bias, pick_bias=pick_bias)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        full = PolicyNet(cfg)
+    full.load_state_dict(net.state_dict(), strict=False)  # only the scorer's keys are missing
+    return full.eval()
 
 
 def save_checkpoint(net: PolicyNet, path: str | Path, meta: dict | None = None,

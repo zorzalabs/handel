@@ -120,6 +120,46 @@ busy machine; a stopped run continues when the command is run again):
 uv run python -m handel.rl.trade_quality runs/league_4p_respond_s0/best.pt --offers 200 --rollouts 300
 ```
 
+## Trade proposals (Phase 12)
+
+`league_4p_full.toml` is the Phase 11 league with `[agent] trade_mode = "full"`:
+the network also proposes trades. In MANAGE it sees up to 16 candidate offers
+next to its normal actions (`src/handel/rl/candidates.py`) and may make one;
+when it answers an offer it may also send back its own counteroffer. Nobody
+proposes on its behalf any more: the offer the heuristic bot would propose is
+one of the candidates.
+
+The network gets a *candidate scorer* (new weights, added when the run starts
+from a checkpoint that has none). `[model] propose_bias` and `pick_bias` set
+where it starts: every candidate at about 0.4% and the heuristic bot's pick at
+about 92%, so the run starts at the Phase 11 level and learns from there.
+
+```bash
+uv run handel-train configs/rl/league_4p_full.toml
+uv run handel-train --resume runs/league_4p_full_s0
+```
+
+`train.csv` gets four more columns: `proposals_per_seat`, `pick_share` (how
+many of the proposals were the heuristic bot's pick), `deals_per_seat` and
+`own_counters_per_seat`. Watch them for spam.
+
+The same weights play the older modes too, which splits the result into parts:
+
+```bash
+# the Phase 12 agent, then the same weights with the heuristic bot proposing for it
+uv run handel-rl-eval runs/league_4p_full_s0/best.pt --opponents heuristic,heuristic,heuristic --games 4000 --seed 0
+uv run handel-rl-eval runs/league_4p_full_s0/best.pt --opponents heuristic,heuristic,heuristic --games 4000 --seed 0 --trade-mode respond
+```
+
+Two more reports:
+
+```bash
+# what its own deals are worth (fair value for itself, its partner and the others; kingmaking check)
+uv run python -m handel.rl.deals runs/league_4p_full_s0/best.pt --games 300 --deals 200 --rollouts 300
+# head to head, 2 players, each checkpoint in the mode it was trained in
+uv run python -m handel.rl.duel runs/league_4p_full_s0/best.pt runs/league_4p_s0/best.pt --games 2000
+```
+
 The untrained baseline (a fresh network) is evaluated with:
 
 ```bash

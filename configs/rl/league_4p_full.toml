@@ -1,0 +1,81 @@
+# Phase 12: the agent proposes its own trades, 4 players.
+# Same league as Phase 11 (league_4p_respond.toml) with three changes:
+#   1. [agent] trade_mode = "full": in MANAGE the network may make one of up to 16 candidate offers
+#      (src/handel/rl/candidates.py), and when it answers an offer it may send back its own counteroffer.
+#      Nobody proposes on its behalf any more; the heuristic bot's proposal is one of the candidates
+#   2. the network gets a candidate scorer (new weights). It starts by proposing what the heuristic bot
+#      would, so the run starts at about the Phase 11 level
+#   3. it starts from the best Phase 11 checkpoint
+#
+#   uv run handel-train configs/rl/league_4p_full.toml
+#   uv run handel-train --resume runs/league_4p_full_s0        (after stopping it)
+
+name = "league_4p_full"
+seed = 0
+total_steps = 300_000_000   # RL decisions; about 9 hours on an Apple M1
+init_from = "runs/league_4p_respond_s0/best.pt"
+
+[game]
+players = 4
+max_rounds = 150
+
+[agent]
+trade_mode = "full"       # who answers offers and who proposes; the table is in src/handel/rl/trade.py
+trade_hint = true         # the Phase 11 checkpoint has the two hint inputs, so this has to stay on
+max_candidates = 16       # candidate offers per decision (the action space has 16 slots)
+
+[opponents]
+# Bots for the "bots" share of the league mix. A name listed twice is drawn twice as often.
+# Heuristic bots are there so that there is always someone sensible to trade with.
+pool = ["heuristic", "heuristic", "lowball", "lowball", "generous", "heuristic_notrade", "always_buy"]
+
+[league]
+snapshot_every = 25       # updates between snapshots; every snapshot also plays a rating round
+current = 0.4             # share of the other seats: the current policy (self-play, also learned from)
+snapshots = 0.4           # ... a past snapshot
+bots = 0.2                # ... a bot from [opponents] pool
+recent_count = 8          # half of the snapshot seats come from the newest 8 snapshots,
+recent_share = 0.5        # the other half from all snapshots, so old ones never disappear
+rating_games = 200        # Elo games per snapshot
+rating_k = 32.0
+
+[model]
+hidden = [256, 256]
+end_turn_bias = 2.0       # only matters for a fresh network (ignored with init_from)
+cand_hidden = 64          # hidden units of the candidate scorer
+propose_bias = -5.5       # starting score of a candidate; "no trade" has score 0 (about 0.4% per candidate)
+pick_bias = 8.0           # added for the heuristic bot's pick: it starts at score +2.5 (about 92%)
+
+[ppo]
+steps_per_update = 65536
+epochs = 4
+minibatch_size = 4096
+lr = 1e-4
+anneal_lr = true          # decays to 0 at total_steps
+gamma = 1.0
+gae_lambda = 0.99
+clip = 0.2
+vf_coef = 0.5
+ent_coef = 0.0
+max_grad_norm = 0.5
+target_kl = 0.0
+
+[reward]
+win = 1.0
+shaping_coef = 0.0
+shaping_decay = true
+
+[eval]
+every = 50                # updates between evaluations; keep it a multiple of league.snapshot_every
+games = 1000
+lineups = [
+    ["heuristic", "heuristic", "heuristic"],     # the fixed benchmark: picks best.pt and drives the self-play warning
+    ["lowball", "lowball", "lowball"],           # does it still turn bad offers down?
+    ["lowball", "heuristic", "generous"],        # good and bad offers at one table
+]
+
+[run]
+workers = 0               # 0 = one rollout process per CPU core
+learner_threads = 4
+checkpoint_every = 100
+entropy_warn = 0.05       # warn when the policy entropy falls below this (nats)

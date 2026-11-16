@@ -48,6 +48,17 @@ An ``[agent]`` section says how the RL seats trade (Phase 11, see ``trade.py``):
     trade_mode = "respond"      # the network answers offers; the heuristic bot proposes for it
     trade_hint = true           # add the heuristic's rating of the offer to the observation
 
+With ``trade_mode = "full"`` (Phase 12) the network also proposes trades, by
+choosing among candidate offers (``candidates.py``). Three more keys apply::
+
+    [agent]
+    max_candidates = 16         # candidate offers per decision (at most 16, the slots of the action space)
+
+    [model]
+    cand_hidden = 64            # hidden units of the candidate scorer
+    propose_bias = -5.5         # starting score of a candidate ("no trade" is 0); only used for new weights
+    pick_bias = 8.0             # added for the offer the heuristic bot would propose; only used for new weights
+
 Every key is optional except ``name``. Unknown keys are an error, so a typo
 cannot silently fall back to a default. The resolved config is saved as
 ``config.json`` in the run folder and a resumed run reads it from there.
@@ -71,6 +82,7 @@ from pathlib import Path
 from typing import Any
 
 from ..engine.state import GameConfig
+from .actions import NUM_PROPOSE_SLOTS
 from .observation import MAX_PLAYERS, OBS_SIZE, OBS_SIZE_HINT
 from .opponents import OPPONENTS
 from .rollout import RL, GameSpec
@@ -151,6 +163,10 @@ class TrainConfig:
     entropy_warn: float = 0.0  # warn when the policy entropy (nats) falls below this (0 = never)
     trade_mode: str = DEFAULT_TRADE_MODE  # who answers offers and who proposes (trade.py)
     trade_hint: bool = False  # the observation also holds the heuristic's rating of an offer
+    max_candidates: int = NUM_PROPOSE_SLOTS  # trade candidates per decision in "full" mode
+    cand_hidden: int = 64  # hidden units of the candidate scorer
+    propose_bias: float = -5.5  # starting score of every candidate (new scorer weights only)
+    pick_bias: float = 8.0  # added to the starting score of the heuristic bot's pick (new scorer weights only)
 
     @property
     def run_id(self) -> str:
@@ -192,6 +208,11 @@ class TrainConfig:
         if self.trade_hint and not TRADE_MODES[self.trade_mode].policy_answers:
             raise ValueError("agent.trade_hint only makes sense when the network answers offers "
                              "(agent.trade_mode \"respond\" or \"respond_only\")")
+        if not 1 <= self.max_candidates <= NUM_PROPOSE_SLOTS:
+            raise ValueError(f"agent.max_candidates must be 1 to {NUM_PROPOSE_SLOTS} "
+                             "(the candidate slots of the action space)")
+        if self.cand_hidden < 1:
+            raise ValueError("model.cand_hidden must be at least 1")
         lg = self.league
         if lg.enabled:
             shares = (lg.current, lg.snapshots, lg.bots)
@@ -209,9 +230,9 @@ _SECTIONS: dict[str, Any] = {"ppo": PPOConfig, "reward": RewardConfig, "eval": E
                              "league": LeagueConfig}
 _FLAT: dict[str, tuple[str, ...]] = {
     "game": ("players", "max_rounds"),
-    "model": ("hidden", "end_turn_bias"),
+    "model": ("hidden", "end_turn_bias", "cand_hidden", "propose_bias", "pick_bias"),
     "run": ("workers", "learner_threads", "checkpoint_every", "entropy_warn"),
-    "agent": ("trade_mode", "trade_hint"),
+    "agent": ("trade_mode", "trade_hint", "max_candidates"),
 }
 _TOP = ("name", "seed", "total_steps", "init_from")
 

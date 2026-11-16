@@ -18,16 +18,24 @@ Index layout (``NUM_ACTIONS`` = 125)::
     52..79     Mortgage(pos)      one per property (28: streets, stations, utilities)
     80..107    Unmortgage(pos)    one per property
     108        counter with the heuristic's suggestion (Phase 11, see ``trade.py``)
-    109..124   reserved: propose trade candidate k, k = 0..15 (Phase 12)
+    109..124   make trade candidate k, k = 0..15 (Phase 12, see ``candidates.py``)
 
 ``ProposeTrade`` and ``CounterTrade`` are parametric (never listed by
 ``legal_actions``), so they have no index of their own. Index 108 stands for
 "send back the counteroffer the heuristic bot suggests": ``mask`` switches it
 on when the caller says such a counter exists, and ``from_index`` needs that
-counteroffer to build the action. The Phase 12 indices are always masked off.
+counteroffer to build the action.
+
+Index ``PROPOSE_START + k`` stands for "make offer k" of the list that the
+candidate generator built for this decision: a proposal in MANAGE, a
+counteroffer in TRADE_RESPONSE. ``mask`` switches on as many of these slots
+as there are candidates, and ``from_index`` needs the offers to build the
+action. Outside ``trade_mode = "full"`` these slots stay masked off.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -47,6 +55,7 @@ from ..engine.actions import (
     EndTurn,
     Mortgage,
     PayJailFine,
+    ProposeTrade,
     RejectTrade,
     RollForDoubles,
     SellBuilding,
@@ -55,7 +64,7 @@ from ..engine.actions import (
     UseJailCard,
 )
 from ..engine.board import BOARD_SIZE, PROPERTY_POSITIONS, STREET_POSITIONS
-from ..engine.state import GameState
+from ..engine.state import GameState, Phase
 
 BUY = 0
 DECLINE_BUY = 1
@@ -75,7 +84,7 @@ MORTGAGE_START = SELL_START + NUM_STREETS  # 52
 UNMORTGAGE_START = MORTGAGE_START + NUM_PROPERTIES  # 80
 COUNTER_HEURISTIC = UNMORTGAGE_START + NUM_PROPERTIES  # 108, counter with the heuristic's suggestion
 NUM_PROPOSE_SLOTS = 16
-PROPOSE_START = COUNTER_HEURISTIC + 1  # 109, reserved for Phase 12
+PROPOSE_START = COUNTER_HEURISTIC + 1  # 109, the first trade candidate slot (Phase 12)
 NUM_ACTIONS = PROPOSE_START + NUM_PROPOSE_SLOTS  # 125
 
 # Board position -> slot within its block (-1 where the action cannot apply).
@@ -129,15 +138,23 @@ def to_index(a: Action) -> int:
     raise ValueError(f"{a!r} has no index in the RL action space")
 
 
-def from_index(i: int, state: GameState, counter: TradeOffer | None = None) -> Action:
+def from_index(i: int, state: GameState, counter: TradeOffer | None = None,
+               candidates: Sequence[TradeOffer] = ()) -> Action:
     """The concrete action for index ``i`` in ``state`` (Buy/DeclineBuy use ``pending_buy``).
 
     ``counter`` is the counteroffer that index ``COUNTER_HEURISTIC`` stands for.
+    ``candidates`` are the offers behind the candidate slots: slot k proposes
+    offer k in MANAGE and sends it back as a counteroffer in TRADE_RESPONSE.
     """
     if i == COUNTER_HEURISTIC:
         if counter is None:
             raise ValueError(f"index {i} needs the counteroffer it stands for")
         return CounterTrade(counter)
+    if PROPOSE_START <= i < NUM_ACTIONS:
+        k = i - PROPOSE_START
+        if k >= len(candidates):
+            raise ValueError(f"index {i} is candidate {k}, but there are only {len(candidates)} candidates")
+        return CounterTrade(candidates[k]) if state.phase == Phase.TRADE_RESPONSE else ProposeTrade(candidates[k])
     if i == BUY:
         return Buy(state.pending_buy)
     if i == DECLINE_BUY:
@@ -156,19 +173,23 @@ def from_index(i: int, state: GameState, counter: TradeOffer | None = None) -> A
     raise ValueError(f"index {i} is reserved or out of range")
 
 
-def mask(state: GameState, player: int, legal: list[Action], counter: bool = False) -> np.ndarray:
+def mask(state: GameState, player: int, legal: list[Action], counter: bool = False,
+         candidates: int = 0) -> np.ndarray:
     """Boolean mask over all indices: True exactly for the actions in ``legal``.
 
     ``counter=True`` also switches on ``COUNTER_HEURISTIC``; the caller passes
     it when the heuristic bot has a counteroffer to suggest (``trade.py``).
-    ``state`` and ``player`` are unused for now; Phase 12 uses them for the
-    proposal slots.
+    ``candidates`` is the number of trade candidates on offer; that many
+    candidate slots are switched on. ``state`` and ``player`` are unused.
     """
+    if not 0 <= candidates <= NUM_PROPOSE_SLOTS:
+        raise ValueError(f"there are {NUM_PROPOSE_SLOTS} candidate slots, got {candidates} candidates")
     m = np.zeros(NUM_ACTIONS, dtype=bool)
     for a in legal:
         m[to_index(a)] = True
     if counter:
         m[COUNTER_HEURISTIC] = True
+    m[PROPOSE_START:PROPOSE_START + candidates] = True
     return m
 
 
@@ -180,6 +201,6 @@ def describe(i: int) -> str:
     if i in names:
         return names[i]
     if PROPOSE_START <= i < NUM_ACTIONS:
-        return f"ProposeCandidate({i - PROPOSE_START}) (reserved)"
+        return f"TradeCandidate({i - PROPOSE_START})"
     a = from_index(i, None)  # type: ignore[arg-type]  # positional actions do not read the state
     return f"{type(a).__name__}({a.pos})"  # type: ignore[attr-defined]

@@ -25,11 +25,11 @@ def test_every_unreserved_index_round_trips_by_type():
         assert A.describe(i)
 
 
-def test_reserved_indices_and_parametric_actions_have_no_mapping():
+def test_trade_indices_need_their_offers_and_parametric_actions_have_no_mapping():
     for i in range(A.COUNTER_HEURISTIC, A.NUM_ACTIONS):
         with pytest.raises(ValueError):
-            A.from_index(i, _FakeState())  # 108 needs its counteroffer, 109+ are reserved
-        assert ("reserved" in A.describe(i)) == (i >= A.PROPOSE_START)
+            A.from_index(i, _FakeState())  # 108 needs its counteroffer, 109+ the candidate offers
+        assert ("TradeCandidate" in A.describe(i)) == (i >= A.PROPOSE_START)
     assert A.describe(A.COUNTER_HEURISTIC) == "CounterHeuristic"
     with pytest.raises(ValueError):
         A.to_index(ProposeTrade(TradeOffer(0, 1, give_cash=10)))
@@ -48,7 +48,7 @@ def test_legal_actions_round_trip_and_mask_on_thousands_of_positions():
         idx = [A.to_index(a) for a in legal]
         assert len(set(idx)) == len(idx), legal  # no two legal actions share an index
         assert set(np.flatnonzero(m).tolist()) == set(idx)  # the mask allows exactly the legal actions
-        assert not m[A.COUNTER_HEURISTIC:].any()  # reserved slots stay off
+        assert not m[A.COUNTER_HEURISTIC:].any()  # the trade slots stay off unless the caller asks
         for a, i in zip(legal, idx):
             assert A.from_index(i, s) == a
         n_positions += 1

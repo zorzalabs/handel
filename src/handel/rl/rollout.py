@@ -13,8 +13,11 @@ Decisions of snapshots and bots happen inside the environment.
 
 For every RL decision we keep the observation, mask, action index, log
 probability, value estimate and net worth share, grouped per (game, seat).
-When the game ends, each RL seat's trajectory gets the outcome (won, final
-rank, net worth).
+In ``trade_mode = "full"`` the feature rows of the trade candidates are kept
+too: all rows of a trajectory in one array (``cands``) and the number of
+candidates of every decision (``cand_counts``), because most decisions have
+none. When the game ends, each RL seat's trajectory gets the outcome (won,
+final rank, net worth).
 
 ``trade_mode`` says who answers offers and who proposes trades for the RL and
 snapshot seats (see ``trade.py``). The default is the Phase 8 to 10 behaviour.
@@ -51,6 +54,7 @@ from ..engine.state import GameConfig
 from ..runner import bot_seed, play_game
 from .actions import NUM_ACTIONS
 from .agent import RLAgent
+from .candidates import CAND_FEATURES
 from .observation import OBS_SIZE
 from .opponents import make_opponent
 from .policy import NumpyPolicy, PolicyConfig, PolicyNet, numpy_weights
@@ -83,6 +87,13 @@ class SeatTrajectory:
     rank: int = 0  # 1 = winner
     net_worth: int = 0
     final_share: float = 0.0  # share of all net worth when the game ended
+    # Trade candidates: all feature rows of the trajectory, decision after decision, and how many each had.
+    cands: np.ndarray = field(default_factory=lambda: np.zeros((0, CAND_FEATURES), np.float32))  # (C, F)
+    cand_counts: np.ndarray | None = None  # (T,) int16; None means no decision had candidates
+
+    def __post_init__(self) -> None:
+        if self.cand_counts is None:
+            self.cand_counts = np.zeros(len(self.actions), np.int16)
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -103,6 +114,8 @@ class GameRollout:
     trajectories: list[SeatTrajectory] = field(default_factory=list)  # empty unless recording
     # Offers the "rl" seats accepted, rejected and countered (whoever decided: network or heuristic).
     rl_answers: tuple[int, int, int] = (0, 0, 0)
+    # What the "rl" seats started: proposals, of which heuristic picks, of which deals; own counteroffers.
+    rl_trades: tuple[int, int, int, int] = (0, 0, 0, 0)
 
     def summary(self) -> dict:
         d = asdict(self)
@@ -121,6 +134,7 @@ def _trajectory(agent: RLAgent, seat: int) -> SeatTrajectory:
     st = agent.steps
     if not st:
         return _empty_trajectory(seat, agent.policy.cfg.obs_size)
+    rows = [x.cands for x in st if x.cands is not None]
     return SeatTrajectory(
         seat=seat,
         obs=np.stack([x.obs for x in st]),
@@ -130,6 +144,8 @@ def _trajectory(agent: RLAgent, seat: int) -> SeatTrajectory:
         values=np.array([x.value for x in st], np.float32),
         phases=np.array([x.phase for x in st], np.int8),
         shares=np.array([x.share for x in st], np.float32),
+        cands=np.concatenate(rows) if rows else np.zeros((0, CAND_FEATURES), np.float32),
+        cand_counts=np.array([0 if x.cands is None else len(x.cands) for x in st], np.int16),
     )
 
 
@@ -154,14 +170,17 @@ def play_rollout(policy: PolicyNet | NumpyPolicy, spec: GameSpec, config: GameCo
                                   name=name))
         else:
             agents.append(make_opponent(name, sd))
-    result, _ = play_game(agents, seed=spec.seed, config=config)
+    result, final = play_game(agents, seed=spec.seed, config=config)
     ranks = placements({"lineup": spec.lineup, "bankrupt_order": result.bankrupt_order,
                         "winner_seat": result.winner, "net_worth": result.net_worth})
     learners = [a for a, name in zip(agents, spec.lineup) if name == RL]
+    for a in learners:
+        a.finish(final)  # count a proposal that was still open when the game ended
     out = GameRollout(spec.game_id, spec.seed, spec.lineup, result.winner, result.end_reason,
                       result.rounds, result.turns, ranks, result.net_worth,
                       sum(a.decisions for a in learners),
-                      rl_answers=tuple(sum(a.answers[k] for a in learners) for k in range(3)))
+                      rl_answers=tuple(sum(a.answers[k] for a in learners) for k in range(3)),
+                      rl_trades=tuple(sum(a.trades[k] for a in learners) for k in range(4)))
     if record:
         total = sum(result.net_worth)
         for i, a in enumerate(agents):

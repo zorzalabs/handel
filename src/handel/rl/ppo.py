@@ -45,6 +45,13 @@ With ``[agent] trade_mode = "respond"`` (Phase 11, see ``trade.py``) the network
 also answers trade offers, and ``train.csv`` gets four more columns: offers
 answered per RL seat and the share it accepted, rejected and countered.
 
+With ``trade_mode = "full"`` (Phase 12) the network also proposes trades, by
+choosing among candidate offers (``candidates.py``). A checkpoint without the
+candidate scorer gets a fresh one when the run starts. ``train.csv`` gets four
+more columns: proposals per RL seat, the share of them that was the heuristic
+bot's pick, deals per RL seat that came out of its proposals, and its own
+counteroffers per RL seat. These are the numbers to watch for spam.
+
 Every checkpoint works with ``handel-rl-eval``. Same seed and same config give
 the same weights on the same machine, with any number of workers, and a
 resumed run continues exactly as if it had never stopped.
@@ -70,12 +77,15 @@ import torch
 from torch import nn
 
 from ..engine.state import Phase
-from .actions import ACCEPT, COUNTER_HEURISTIC, REJECT
+from .actions import ACCEPT, COUNTER_HEURISTIC, NUM_PROPOSE_SLOTS, PROPOSE_START, REJECT
+from .agent import DEALS, OWN_COUNTERS, PICKS, PROPOSED
+from .candidates import CAND_FEATURES
 from .evaluate import schedule, summarize
 from .league import League
 from .policy import (
     PolicyConfig,
     PolicyNet,
+    add_scorer,
     load_checkpoint,
     net_from_checkpoint,
     random_policy,
@@ -156,6 +166,11 @@ class Batch:
     wins: int
     reward_sum: float  # sum of all rewards (terminal + shaping)
     answers: tuple[int, int, int] = (0, 0, 0)  # offers the network accepted, rejected, countered
+    # Trade candidates ("full" mode): every feature row of the batch, decision after decision,
+    # and the number of candidates of each decision (0 for most).
+    cands: np.ndarray | None = None  # (C, CAND_FEATURES) float32
+    cand_counts: np.ndarray | None = None  # (N,) int16
+    trades: tuple[int, int, int, int] = (0, 0, 0, 0)  # proposals, heuristic picks, deals, own counteroffers
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -163,8 +178,8 @@ class Batch:
 
 def build_batch(rollouts: list[GameRollout], cfg: TrainConfig, shaping_coef: float = 0.0) -> Batch:
     """Put rewards on every trajectory, run GAE, and flatten everything into one batch."""
-    parts: dict[str, list[np.ndarray]] = {k: [] for k in
-                                          ("obs", "masks", "actions", "logps", "values", "adv", "ret")}
+    parts: dict[str, list[np.ndarray]] = {k: [] for k in ("obs", "masks", "actions", "logps", "values",
+                                                          "adv", "ret", "cands", "counts")}
     games = wins = 0
     reward_sum = 0.0
     answers = [0, 0, 0]
@@ -187,15 +202,19 @@ def build_batch(rollouts: list[GameRollout], cfg: TrainConfig, shaping_coef: flo
             if len(answered):
                 for k, index in enumerate(TRADE_ANSWERS):
                     answers[k] += int((answered == index).sum())
+                answers[2] += int((answered >= PROPOSE_START).sum())  # its own counteroffers count as counters
             adv, ret = gae(rewards, tr.values, cfg.ppo.gamma, cfg.ppo.gae_lambda)
             for k, x in (("obs", tr.obs), ("masks", tr.masks), ("actions", tr.actions),
-                         ("logps", tr.logps), ("values", tr.values), ("adv", adv), ("ret", ret)):
+                         ("logps", tr.logps), ("values", tr.values), ("adv", adv), ("ret", ret),
+                         ("cands", tr.cands), ("counts", tr.cand_counts)):
                 parts[k].append(x)
     if not parts["obs"]:
         raise RuntimeError("the batch has no RL decisions; check the lineup")
     cat = {k: np.concatenate(v) for k, v in parts.items()}
+    trades = tuple(sum(g.rl_trades[k] for g in rollouts) for k in range(4))
     return Batch(cat["obs"], cat["masks"], cat["actions"], cat["logps"], cat["values"],
-                 cat["adv"], cat["ret"], games, wins, reward_sum, (answers[0], answers[1], answers[2]))
+                 cat["adv"], cat["ret"], games, wins, reward_sum, (answers[0], answers[1], answers[2]),
+                 cat["cands"], cat["counts"], trades)
 
 
 # --- The PPO update -----------------------------------------------------------------------
@@ -207,10 +226,49 @@ def explained_variance(values: np.ndarray, returns: np.ndarray) -> float:
     return float("nan") if var == 0 else 1.0 - float(np.var(returns - values)) / var
 
 
+def candidate_index(counts: np.ndarray) -> np.ndarray:
+    """``(N, NUM_PROPOSE_SLOTS)`` row numbers into the batch's candidate rows, shifted by one.
+
+    Entry ``[i, k]`` is 1 + the row of candidate k of decision i, or 0 where
+    decision i has no candidate k. With a zero row put in front of the
+    candidate rows, ``rows[index]`` is the padded ``(N, K, F)`` array the
+    network wants, without ever storing it for the whole batch.
+    """
+    counts = counts.astype(np.int64)
+    starts = np.cumsum(counts) - counts
+    k = np.arange(NUM_PROPOSE_SLOTS)[None, :]
+    return np.where(k < counts[:, None], starts[:, None] + k + 1, 0)
+
+
+def packed_candidates(rows: torch.Tensor, counts: np.ndarray, starts: np.ndarray,
+                      idx: np.ndarray) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """The candidates of the decisions ``idx`` in the packed form ``PolicyNet.forward`` takes.
+
+    ``rows`` are all candidate rows of the batch, ``counts`` the number of
+    candidates per decision and ``starts`` the row where each decision's
+    candidates begin. Returns ``(rows of these decisions, position of each
+    row's decision within idx, its slot)``, or ``None`` when none of them has
+    a candidate.
+    """
+    cnt = counts[idx]
+    total = int(cnt.sum())
+    if total == 0:
+        return None
+    owner = np.repeat(np.arange(len(idx)), cnt)
+    slot = np.arange(total) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    row = np.repeat(starts[idx], cnt) + slot
+    return rows[torch.from_numpy(row)], torch.from_numpy(owner), torch.from_numpy(slot)
+
+
 def ppo_update(net: PolicyNet, optimizer: torch.optim.Optimizer, batch: Batch, cfg: PPOConfig,
                lr: float, rng: np.random.Generator) -> dict[str, float]:
     """A few epochs of minibatch gradient steps on one batch. Returns the logged statistics."""
     obs = torch.from_numpy(batch.obs)
+    cand_rows = None
+    if net.has_scorer and batch.cand_counts is not None and batch.cand_counts.any():
+        cand_rows = torch.from_numpy(batch.cands)
+        cand_counts = batch.cand_counts.astype(np.int64)
+        cand_starts = np.cumsum(cand_counts) - cand_counts
     masks = torch.from_numpy(batch.masks)
     actions = torch.from_numpy(batch.actions)
     old_logps = torch.from_numpy(batch.logps)
@@ -231,7 +289,9 @@ def ppo_update(net: PolicyNet, optimizer: torch.optim.Optimizer, batch: Batch, c
             mb = torch.from_numpy(idx)
             # Run the batch through the current network: log probability of the action
             # that was taken, entropy of the policy, and the value estimate.
-            logp, entropy, value = net.evaluate(obs[mb], masks[mb], actions[mb])
+            # Only the real trade candidates of this minibatch (most decisions have none).
+            cands = None if cand_rows is None else packed_candidates(cand_rows, cand_counts, cand_starts, idx)
+            logp, entropy, value = net.evaluate(obs[mb], masks[mb], actions[mb], cands)
 
             # ratio = new probability / old probability of the action that was taken.
             log_ratio = logp - old_logps[mb]
@@ -375,7 +435,8 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
     elo_csv, warn_csv = run_dir / "elo.csv", run_dir / "warnings.csv"
     commit = git_commit()
     league = League(cfg, run_dir) if cfg.league.enabled else None
-    policy_answers = get_trade_mode(cfg.trade_mode).policy_answers
+    mode = get_trade_mode(cfg.trade_mode)
+    policy_answers = mode.policy_answers
 
     # Seeds. Nothing below draws from the global generators (games are seeded per game,
     # minibatches per update), but set them anyway so stray randomness is repeatable.
@@ -409,9 +470,18 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
                 added = cfg.obs_size - net.cfg.obs_size
                 net = widen_inputs(net, cfg.obs_size)
                 echo(f"added {added} trade hint inputs (their weights start at 0)")
+            if mode.policy_proposes and not net.has_scorer:
+                # New weights for scoring trade candidates; everything else plays as before.
+                net = add_scorer(net, cfg.seed, cfg.cand_hidden, cfg.max_candidates, cfg.propose_bias,
+                                 cfg.pick_bias)
+                echo("added the trade candidate scorer (new weights; it starts by proposing what the "
+                     "heuristic bot would)")
         else:
+            scorer = ({"cand_features": CAND_FEATURES, "cand_hidden": cfg.cand_hidden,
+                       "max_candidates": cfg.max_candidates, "propose_bias": cfg.propose_bias,
+                       "pick_bias": cfg.pick_bias} if mode.policy_proposes else {})
             net = random_policy(cfg.seed, PolicyConfig(obs_size=cfg.obs_size, hidden=list(cfg.hidden),
-                                                       end_turn_bias=cfg.end_turn_bias))
+                                                       end_turn_bias=cfg.end_turn_bias, **scorer))
         optimizer = torch.optim.Adam(net.parameters(), lr=cfg.ppo.lr, eps=1e-5)
         save_config(cfg, run_dir / "config.json")
         (run_dir / "run.json").write_text(json.dumps({
@@ -537,6 +607,14 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
                             "reject_share": rejected, "counter_share": countered})
                 trade_note = f" | {row['offers_per_seat']:.1f} offers/seat" + (
                     f", {accepted:.0%} accepted, {countered:.0%} countered" if offers else "")
+            if mode.policy_proposes:  # what the network proposed in this batch (watch these for spam)
+                proposed = batch.trades[PROPOSED]
+                picks = round(batch.trades[PICKS] / proposed, 4) if proposed else ""
+                row.update({"proposals_per_seat": round(proposed / batch.games, 3), "pick_share": picks,
+                            "deals_per_seat": round(batch.trades[DEALS] / batch.games, 3),
+                            "own_counters_per_seat": round(batch.trades[OWN_COUNTERS] / batch.games, 3)})
+                trade_note += f" | {row['proposals_per_seat']:.1f} proposals/seat" + (
+                    f" ({picks:.0%} picks), {row['deals_per_seat']:.2f} deals" if proposed else "")
             append_row(train_csv, row)
             eta = (cfg.total_steps - state.steps) / max(row["steps_per_s"], 1)
             echo(f"upd {state.update:4d} | {_fmt_steps(state.steps):>6}/{_fmt_steps(cfg.total_steps)} steps"

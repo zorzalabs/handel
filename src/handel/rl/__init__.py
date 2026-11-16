@@ -19,7 +19,10 @@ Modules (import them directly; this package imports nothing so that
 * ``ratings``: Elo ratings for snapshots and bots; the self-play warning
 * ``exploiters``, ``opponents``: bots with one odd habit, and all opponents by name
 * ``probe``: play a policy against the exploiter bots
-* ``trade``: trade modes (Phase 11): who answers offers and who proposes, the counter action
+* ``trade``: trade modes (Phases 11 and 12): who answers offers and who proposes, the counter action
 * ``trade_bots``: the ``lowball`` and ``generous`` bots, which make sure the agent sees offers
 * ``trade_quality``: fair value report on the offers a policy answered
+* ``candidates``: the candidate offers the network chooses from (Phase 12), their features and messages
+* ``deals``: fair value report on the deals a policy proposed (spam and kingmaking checks)
+* ``duel``: two checkpoints play each other, each in its own trade mode
 """
