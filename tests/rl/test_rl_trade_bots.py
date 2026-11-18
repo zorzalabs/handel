@@ -53,7 +53,7 @@ def _answer(s: GameState, offer: TradeOffer):
 
 
 def test_trade_bots_are_extra_opponents_and_the_bot_registry_is_untouched():
-    assert set(TRADE_BOTS) == {"lowball", "generous"}
+    assert set(TRADE_BOTS) == {"lowball", "generous", "tough"}  # tough added in Phase 13
     assert set(BOTS) == {"random", "always_buy", "heuristic", "heuristic_notrade"}
     assert set(OPPONENTS) == set(BOTS) | set(EXPLOITERS) | set(TRADE_BOTS)
     assert isinstance(make_opponent("lowball", 1), LowballBot) and make_opponent("lowball", 1).name == "lowball"

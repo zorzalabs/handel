@@ -20,6 +20,14 @@ ones and bad ones. These two bots make sure it does:
 The two offers look alike (a few squares one way, a little cash the other).
 What differs is the direction, so the agent has to read the offer.
 
+A third bot was added in Phase 13 to test answers from a different rule:
+
+* ``tough`` is the heuristic bot with a 4 times wider acceptance margin: it
+  accepts (and counters) only when it gains at least 20% of the value moved
+  (``TOUGH_MARGIN``) instead of 5%. The Phase 12 agent reads the heuristic
+  bot's acceptance threshold from its candidate features, so against
+  ``tough`` that feature is miscalibrated.
+
 Everything else (buying, building, answering offers) is the heuristic bot's
 play. Like the exploiter bots, these are not part of ``handel.bots.BOTS``;
 ``rl/opponents.py`` makes them available by name to the RL commands.
@@ -40,6 +48,8 @@ CHEAP_PRICE = (0.5, 1.0)  # cash in a lowball offer or a gift, as a share of the
 LOWBALL_WAIT = 2  # rounds before lowball asks the same player again
 GENEROUS_CHANCE = 0.5  # chance per turn that generous looks for a gift to make
 MIN_CASH = 10  # lowball always offers at least this much
+TOUGH_MARGIN = 0.20  # tough's acceptance margin, as a share of the value moved (heuristic: 0.05)
+TOUGH_MIN = 40.0  # ... and never less than this (heuristic: 10)
 
 
 def _round10(x: float) -> int:
@@ -130,7 +140,17 @@ class GenerousBot(HeuristicBot):
         return offer if trade_error(s, offer) is None else None
 
 
+class ToughBot(HeuristicBot):
+    """The heuristic bot with a 4 times wider acceptance margin (also used for its own counters)."""
+
+    @staticmethod
+    def _threshold(o: TradeOffer) -> float:
+        moved = sum(BOARD[p].price for p in (*o.give_props, *o.take_props)) + o.give_cash + o.take_cash
+        return max(TOUGH_MIN, TOUGH_MARGIN * moved)
+
+
 TRADE_BOTS: dict[str, Callable[[int], Bot]] = {
     "lowball": LowballBot,
     "generous": GenerousBot,
+    "tough": ToughBot,
 }

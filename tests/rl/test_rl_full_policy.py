@@ -31,7 +31,9 @@ def _net(seed: int = 3) -> PolicyNet:
     with torch.no_grad():
         net.policy_head.weight.mul_(40.0)
         net.cand_out.weight.mul_(60.0)
-        net.cand_skip.weight.add_(torch.randn_like(net.cand_skip.weight) * 0.3)
+        # Seeded on its own: torch's global generator depends on which tests ran before (Phase 13 fix).
+        g = torch.Generator().manual_seed(seed)
+        net.cand_skip.weight.add_(torch.randn(net.cand_skip.weight.shape, generator=g) * 0.3)
     return net
 
 
