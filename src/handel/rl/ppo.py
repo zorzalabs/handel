@@ -79,7 +79,7 @@ from torch import nn
 from ..engine.state import Phase
 from .actions import ACCEPT, COUNTER_HEURISTIC, NUM_PROPOSE_SLOTS, PROPOSE_START, REJECT
 from .agent import DEALS, OWN_COUNTERS, PICKS, PROPOSED
-from .candidates import CAND_FEATURES
+from .candidates import CAND_FEATURES, F_PARTNER_MODEL
 from .evaluate import schedule, summarize
 from .league import League
 from .policy import (
@@ -114,6 +114,11 @@ TRADE_ANSWERS = (ACCEPT, REJECT, COUNTER_HEURISTIC)  # the order of ``Batch.answ
 
 
 # --- Rewards and advantages -------------------------------------------------------------
+
+
+def hidden_cand_features(cfg: TrainConfig) -> list[int]:
+    """Candidate feature columns the network of this run never sees (Phase 13 ablation B3)."""
+    return [] if cfg.cand_partner_model else sorted(F_PARTNER_MODEL)
 
 
 def terminal_reward(won: bool, players: int, win: float = 1.0) -> float:
@@ -198,6 +203,10 @@ def build_batch(rollouts: list[GameRollout], cfg: TrainConfig, shaping_coef: flo
                 shaped = shaping_coef * shaping_rewards(tr.shares, tr.final_share)
                 rewards += shaped
                 reward_sum += float(shaped.sum())
+            if cfg.reward.refused_cost and tr.refused is not None and tr.refused.any():
+                cost = cfg.reward.refused_cost * tr.refused.astype(np.float32)
+                rewards -= cost
+                reward_sum -= float(cost.sum())
             answered = tr.actions[tr.phases == trade_phase]
             if len(answered):
                 for k, index in enumerate(TRADE_ANSWERS):
@@ -473,13 +482,17 @@ def train(cfg: TrainConfig, run_dir: str | Path, resume: bool = False, max_updat
             if mode.policy_proposes and not net.has_scorer:
                 # New weights for scoring trade candidates; everything else plays as before.
                 net = add_scorer(net, cfg.seed, cfg.cand_hidden, cfg.max_candidates, cfg.propose_bias,
-                                 cfg.pick_bias)
+                                 cfg.pick_bias, hidden_cand_features(cfg))
                 echo("added the trade candidate scorer (new weights; it starts by proposing what the "
                      "heuristic bot would)")
+            if mode.policy_proposes and sorted(net.cfg.hidden_cand_features) != hidden_cand_features(cfg):
+                raise ValueError(f"{cfg.init_from} already has a candidate scorer that sees other features "
+                                 "than agent.cand_partner_model asks for; start from a checkpoint without one")
         else:
             scorer = ({"cand_features": CAND_FEATURES, "cand_hidden": cfg.cand_hidden,
                        "max_candidates": cfg.max_candidates, "propose_bias": cfg.propose_bias,
-                       "pick_bias": cfg.pick_bias} if mode.policy_proposes else {})
+                       "pick_bias": cfg.pick_bias, "hidden_cand_features": hidden_cand_features(cfg)}
+                      if mode.policy_proposes else {})
             net = random_policy(cfg.seed, PolicyConfig(obs_size=cfg.obs_size, hidden=list(cfg.hidden),
                                                        end_turn_bias=cfg.end_turn_bias, **scorer))
         optimizer = torch.optim.Adam(net.parameters(), lr=cfg.ppo.lr, eps=1e-5)

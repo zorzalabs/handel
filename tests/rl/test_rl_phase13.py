@@ -5,6 +5,8 @@ import pytest
 np = pytest.importorskip("numpy")  # RL tests need the "rl" dependency group; skip without it
 torch = pytest.importorskip("torch")
 
+from dataclasses import asdict, replace  # noqa: E402
+
 from handel.bots.heuristic import HeuristicBot  # noqa: E402
 from handel.engine.actions import TradeOffer  # noqa: E402
 from handel.engine.board import GROUP_MEMBERS  # noqa: E402
@@ -12,8 +14,21 @@ from handel.engine.rules import new_game  # noqa: E402
 from handel.rl import ablation as AB  # noqa: E402
 from handel.rl import strategy as ST  # noqa: E402
 from handel.rl import valuecheck as VC  # noqa: E402
+from handel.rl.agent import DEALS, PROPOSED  # noqa: E402
+from handel.rl.candidates import F_PARTNER_MODEL  # noqa: E402
 from handel.rl.opponents import OPPONENTS, make_opponent  # noqa: E402
-from handel.rl.policy import PolicyConfig, add_scorer, random_policy, save_checkpoint  # noqa: E402
+from handel.rl.policy import (  # noqa: E402
+    NumpyPolicy,
+    PolicyConfig,
+    add_scorer,
+    load_checkpoint,
+    net_from_checkpoint,
+    random_policy,
+    save_checkpoint,
+)
+from handel.rl.ppo import build_batch, hidden_cand_features  # noqa: E402
+from handel.rl.rollout import RL, GameSpec, play_rollout  # noqa: E402
+from handel.rl.train_config import RewardConfig, TrainConfig  # noqa: E402
 from handel.rl.trade_bots import ToughBot  # noqa: E402
 from handel.runner import bot_seed, play_game  # noqa: E402
 
@@ -159,3 +174,68 @@ def test_tables_with_checkpoints_and_copies(full_ckpt):
     s = AB.summarize_table(rows)
     assert s["games"] == 3 and 0.0 <= s["win_rate"]["value"] <= 1.0
     assert AB.paired_difference({"games": rows}, {"games": rows})["diff"] == 0.0
+
+
+# --- ablation B3: candidate features the network never sees ----------------------------------------
+
+def _rollouts(net, lineup: tuple[str, ...] = ("tough", "heuristic", "lowball"), games: int = 6) -> list:
+    pol = NumpyPolicy.from_net(net)
+    return [play_rollout(pol, GameSpec(i, 40 + i, (RL, *lineup)), record=True, trade_mode="full")
+            for i in range(games)]
+
+
+def test_hidden_candidate_features_are_always_zero(tmp_path):
+    hidden = add_scorer(random_policy(0, PolicyConfig(end_turn_bias=2.0)), 0, propose_bias=-1.0, pick_bias=3.0,
+                        hidden_cand_features=list(F_PARTNER_MODEL))
+    assert hidden.cfg.hidden_cand_features == [67, 68]
+    save_checkpoint(hidden, tmp_path / "h.pt")
+    assert load_checkpoint(tmp_path / "h.pt")[0].cfg.hidden_cand_features == [67, 68]
+    old = asdict(_full_net().cfg)
+    del old["hidden_cand_features"]  # a checkpoint from before Phase 13
+    assert net_from_checkpoint({"policy": old, "state_dict": _full_net().state_dict()}).cfg.hidden_cand_features == []
+    cols = list(F_PARTNER_MODEL)
+
+    def partner_columns(net) -> np.ndarray:
+        rows = [tr.cands for g in _rollouts(net) for tr in g.trajectories if len(tr.cands)]
+        return np.concatenate(rows)[:, cols]
+
+    seen = partner_columns(hidden)
+    assert len(seen) > 50 and not seen.any()
+    assert partner_columns(_full_net()).any()  # without the ablation they carry information
+
+
+def test_the_config_switch_hides_the_partner_model():
+    base = TrainConfig(name="x", trade_mode="full", trade_hint=True)
+    assert hidden_cand_features(base) == []
+    assert hidden_cand_features(replace(base, cand_partner_model=False)) == [67, 68]
+    with pytest.raises(ValueError):
+        replace(base, trade_mode="respond", cand_partner_model=False).validate()
+    with pytest.raises(ValueError):
+        replace(base, reward=RewardConfig(refused_cost=-0.1)).validate()
+
+
+# --- ablation B5: a cost for refused proposals ---------------------------------------------------------
+
+def test_refused_proposals_are_marked_on_the_decision_that_made_them():
+    rollouts = _rollouts(_full_net(), games=8)
+    marked = made = 0
+    for g in rollouts:
+        (tr,) = g.trajectories
+        assert tr.refused.sum() == g.rl_trades[PROPOSED] - g.rl_trades[DEALS]
+        assert (tr.actions[tr.refused] >= 109).all() and (tr.phases[tr.refused] == 2).all()  # MANAGE proposals
+        marked += int(tr.refused.sum())
+        made += g.rl_trades[PROPOSED]
+    assert made > 10 and marked > 5
+
+
+def test_the_refused_cost_lowers_the_reward_of_those_decisions():
+    rollouts = _rollouts(_full_net(), games=8)
+    cfg = TrainConfig(name="x", trade_mode="full", trade_hint=True)
+    plain = build_batch(rollouts, cfg)
+    costly = build_batch(rollouts, replace(cfg, reward=RewardConfig(refused_cost=0.1)))
+    refused = np.concatenate([tr.refused for g in rollouts for tr in g.trajectories])
+    diff = plain.returns - costly.returns
+    assert refused.sum() > 5
+    assert plain.reward_sum - costly.reward_sum == pytest.approx(0.1 * refused.sum(), abs=1e-4)
+    assert (diff >= -1e-6).all() and (diff[refused] >= 0.1 - 1e-5).all()
+    assert np.array_equal(plain.actions, costly.actions)

@@ -98,6 +98,9 @@ F_CASH = F_TAKE + len(PROPERTY_POSITIONS)  # 60
 F_COMPLETES = 64
 F_UTILITY = 66
 F_ACCEPTABLE = 68
+# The heuristic model's view of the other player (utility and acceptance flag). The Phase 13 ablation
+# B3 sets these columns to 0 (``PolicyConfig.hidden_cand_features``).
+F_PARTNER_MODEL = (F_UTILITY + 1, F_ACCEPTABLE)
 F_PICK = 70
 F_PROPOSAL = 71
 F_COUNTER = 72

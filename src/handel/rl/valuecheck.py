@@ -58,6 +58,7 @@ from .rollout import RL
 
 SELF = "self"  # the opponents' name for a table of copies of the agent
 BINS = 10
+_EMPTY = np.zeros(0, np.float32)
 
 
 def win_chance(value: float, players: int) -> float:
@@ -83,7 +84,8 @@ class ValueProbe(RLAgent):
         n = len(self.steps)
         action = super().choose(state, player, legal)
         if len(self.steps) > n:
-            step = self.steps.pop()  # only the value and share are needed; keeps memory small
+            step = self.steps[-1]
+            step.obs, step.mask, step.cands = _EMPTY, _EMPTY, None  # only the value and share are needed
             self.trace.append((r, step.value, step.share))
             if snap is not None:
                 self._taken.add(r)

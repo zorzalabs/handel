@@ -90,10 +90,13 @@ class SeatTrajectory:
     # Trade candidates: all feature rows of the trajectory, decision after decision, and how many each had.
     cands: np.ndarray = field(default_factory=lambda: np.zeros((0, CAND_FEATURES), np.float32))  # (C, F)
     cand_counts: np.ndarray | None = None  # (T,) int16; None means no decision had candidates
+    refused: np.ndarray | None = None  # (T,) bool: own proposals made here that did not end in a deal
 
     def __post_init__(self) -> None:
         if self.cand_counts is None:
             self.cand_counts = np.zeros(len(self.actions), np.int16)
+        if self.refused is None:
+            self.refused = np.zeros(len(self.actions), bool)
 
     def __len__(self) -> int:
         return len(self.actions)
@@ -146,6 +149,7 @@ def _trajectory(agent: RLAgent, seat: int) -> SeatTrajectory:
         shares=np.array([x.share for x in st], np.float32),
         cands=np.concatenate(rows) if rows else np.zeros((0, CAND_FEATURES), np.float32),
         cand_counts=np.array([0 if x.cands is None else len(x.cands) for x in st], np.int16),
+        refused=np.array([x.refused for x in st], bool),
     )
 
 

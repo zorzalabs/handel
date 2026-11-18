@@ -49,10 +49,14 @@ An ``[agent]`` section says how the RL seats trade (Phase 11, see ``trade.py``):
     trade_hint = true           # add the heuristic's rating of the offer to the observation
 
 With ``trade_mode = "full"`` (Phase 12) the network also proposes trades, by
-choosing among candidate offers (``candidates.py``). Three more keys apply::
+choosing among candidate offers (``candidates.py``). More keys apply::
 
     [agent]
     max_candidates = 16         # candidate offers per decision (at most 16, the slots of the action space)
+    cand_partner_model = true   # false hides the heuristic model's view of the partner (Phase 13 ablation)
+
+    [reward]
+    refused_cost = 0.0          # reward taken off per own proposal that is refused (Phase 13 ablation)
 
     [model]
     cand_hidden = 64            # hidden units of the candidate scorer
@@ -115,6 +119,7 @@ class RewardConfig:
     win: float = 1.0  # a loss gives -win / (players - 1), so a random player expects 0
     shaping_coef: float = 0.0  # reward per unit of net worth share gained between decisions (0 = off)
     shaping_decay: bool = True  # shrink the coefficient linearly to 0 at total_steps
+    refused_cost: float = 0.0  # reward taken off at each own proposal that does not end in a deal (0 = off)
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,8 @@ class TrainConfig:
     cand_hidden: int = 64  # hidden units of the candidate scorer
     propose_bias: float = -5.5  # starting score of every candidate (new scorer weights only)
     pick_bias: float = 8.0  # added to the starting score of the heuristic bot's pick (new scorer weights only)
+    cand_partner_model: bool = True  # False: the candidate features 67 and 68 (the heuristic model's view of
+    # the other player) are always 0 (Phase 13 ablation; new scorer weights only)
 
     @property
     def run_id(self) -> str:
@@ -213,6 +220,10 @@ class TrainConfig:
                              "(the candidate slots of the action space)")
         if self.cand_hidden < 1:
             raise ValueError("model.cand_hidden must be at least 1")
+        if not self.cand_partner_model and not TRADE_MODES[self.trade_mode].policy_proposes:
+            raise ValueError("agent.cand_partner_model = false only makes sense in trade_mode \"full\"")
+        if self.reward.refused_cost < 0:
+            raise ValueError("reward.refused_cost must not be negative")
         lg = self.league
         if lg.enabled:
             shares = (lg.current, lg.snapshots, lg.bots)
@@ -232,7 +243,7 @@ _FLAT: dict[str, tuple[str, ...]] = {
     "game": ("players", "max_rounds"),
     "model": ("hidden", "end_turn_bias", "cand_hidden", "propose_bias", "pick_bias"),
     "run": ("workers", "learner_threads", "checkpoint_every", "entropy_warn"),
-    "agent": ("trade_mode", "trade_hint", "max_candidates"),
+    "agent": ("trade_mode", "trade_hint", "max_candidates", "cand_partner_model"),
 }
 _TOP = ("name", "seed", "total_steps", "init_from")
 

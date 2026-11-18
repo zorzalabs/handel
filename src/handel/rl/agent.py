@@ -87,6 +87,7 @@ class Step:
     phase: int
     share: float = 0.0  # my net worth / all players' net worth, before acting
     cands: np.ndarray | None = None  # (n, CAND_FEATURES) feature rows of the trade candidates, if any
+    refused: bool = False  # a proposal of mine (made at this decision) that did not end in a deal
 
 
 def net_worth_share(state: GameState, player: int) -> float:
@@ -112,6 +113,8 @@ class RLAgent:
         self.name = name
         self.hint = uses_hint(policy.cfg.obs_size)
         self.max_candidates = policy.cfg.max_candidates
+        # Candidate features this network never sees (Phase 13 ablation), set to 0 before scoring.
+        self.hidden_features = list(getattr(policy.cfg, "hidden_cand_features", []) or [])
         self.generator = policy.make_rng(seed)
         # Answers offers in the "heuristic" modes; suggests counters, proposals and picks in the others.
         self.trader = HeuristicBot(seed)
@@ -121,6 +124,7 @@ class RLAgent:
         self.trades = [0, 0, 0, 0]  # proposals, of which heuristic picks, of which deals; own counteroffers
         self._offered: dict[tuple, int] = {}  # offer key -> round in which I proposed it
         self._open: tuple[int, int, TradeOffer] | None = None  # (trade id, my seat, my last proposal)
+        self._open_step: int | None = None  # index in ``steps`` of the decision that made that proposal
         self.last_candidates: list[Candidate] = []  # the trade candidates of the latest network decision
 
     def choose(self, state: GameState, player: int, legal: list[Action]) -> Action:
@@ -180,6 +184,7 @@ class RLAgent:
         self.trades[PICKS] += int(pick)
         self._offered[offer.key()] = state.round
         self._open = (state.trade_id + 1, player, offer)  # the engine numbers the negotiation on apply
+        self._open_step = None  # set by ``_ask`` when the network made this proposal and it is recorded
 
     def _settle(self, state: GameState) -> None:
         """If my last proposal's negotiation is over, count it as a deal when the squares changed hands.
@@ -194,10 +199,13 @@ class RLAgent:
         if state.trade is not None and state.trade_id == tid:
             return  # still being negotiated (I am answering a counteroffer)
         self._open = None
+        step, self._open_step = self._open_step, None
         owner = state.owner
         if (offer.give_props or offer.take_props) and all(owner[p] == me for p in offer.take_props) \
                 and all(owner[p] == offer.responder for p in offer.give_props):
             self.trades[DEALS] += 1
+        elif step is not None:
+            self.steps[step].refused = True
 
     # --- the network --------------------------------------------------------------------
 
@@ -210,6 +218,8 @@ class RLAgent:
         obs = encode(state, player, self.hint)
         m = mask(state, player, legal, counter is not None, len(candidates))
         feats = candidate_features(state, player, candidates) if candidates else None
+        if feats is not None and self.hidden_features:
+            feats[:, self.hidden_features] = 0.0
         if feats is None:
             i, logp, value = self.policy.act(obs, m, self.generator, self.deterministic)
         else:
@@ -224,6 +234,8 @@ class RLAgent:
                 if chosen.pick:
                     note_pick(self.trader, state, chosen.offer)
                 self._opened(state, player, chosen.offer, chosen.pick)
+                if self.record:
+                    self._open_step = len(self.steps) - 1
                 return ProposeTrade(chosen.offer)
             self.trades[OWN_COUNTERS] += 1
             return CounterTrade(chosen.offer)

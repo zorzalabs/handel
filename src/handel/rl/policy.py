@@ -68,6 +68,8 @@ class PolicyConfig:
     max_candidates: int = NUM_PROPOSE_SLOTS  # candidates offered per decision (at most the number of slots)
     propose_bias: float = 0.0  # starting score of every candidate; "no trade" is 0 (only used at init)
     pick_bias: float = 0.0  # added to the starting score of the heuristic bot's pick (only used at init)
+    # Candidate feature columns the agent always sets to 0 before scoring (Phase 13 ablation; [] = none).
+    hidden_cand_features: list[int] = field(default_factory=list)
 
 
 def _layer(n_in: int, n_out: int, gain: float) -> nn.Linear:
@@ -301,17 +303,20 @@ def widen_inputs(net: PolicyNet, obs_size: int) -> PolicyNet:
 
 
 def add_scorer(net: PolicyNet, seed: int = 0, cand_hidden: int = 64, max_candidates: int = NUM_PROPOSE_SLOTS,
-               propose_bias: float = 0.0, pick_bias: float = 0.0) -> PolicyNet:
+               propose_bias: float = 0.0, pick_bias: float = 0.0,
+               hidden_cand_features: list[int] | None = None) -> PolicyNet:
     """A copy of ``net`` with a fresh candidate scorer (weights drawn from ``seed``).
 
     Everything the network already had keeps its weights, so without trade
     candidates the copy gives exactly the same outputs as ``net``. This is how
-    a Phase 11 checkpoint continues in ``trade_mode = "full"``.
+    a Phase 11 checkpoint continues in ``trade_mode = "full"``. ``hidden_cand_features``
+    are candidate feature columns the agent will always set to 0 (an ablation).
     """
     if net.cfg.cand_features:
         return net
     cfg = replace(net.cfg, cand_features=CAND_FEATURES, cand_hidden=cand_hidden, max_candidates=max_candidates,
-                  propose_bias=propose_bias, pick_bias=pick_bias)
+                  propose_bias=propose_bias, pick_bias=pick_bias,
+                  hidden_cand_features=sorted(hidden_cand_features or []))
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         full = PolicyNet(cfg)
