@@ -96,9 +96,11 @@ analysis and the viewer like any other seat.
 | Same tournament with a second `heuristic` bot in the RL agent's seat | 36.4% [34.5%, 38.1%] | 2,000 |
 | Paired difference, RL agent minus heuristic bot in that seat | +28.3 points [+26.1, +30.5] | 2,000 |
 | Two player duel against the Phase 10 agent (self-play, no own trading) | 74.0% [72.2%, 75.8%] | 2,000 |
-| Showcase against Claude Haiku 5.5 (paid, EUR 3 budget) | not run yet | – |
+| Showcase (paid, EUR 2.93): RL agent vs 2 Claude Haiku 5.5 seats and `heuristic` | **60.3%** [48.4%, 71.4%] | 63 |
 
-Intervals are bootstrapped over seeds; every seed is played in every seat rotation.
+Intervals are bootstrapped over seeds; every seed is played in every seat rotation. The
+showcase is a showcase, not a ranking: the EUR 3 budget bought 63 of 80 planned games
+(15 seeds in all 4 rotations, one seed in 3), so its interval is about 23 points wide.
 
 ![Win rate through the training stages](docs/rl/charts/stages_curve.png)
 
@@ -130,15 +132,22 @@ Intervals are bootstrapped over seeds; every seed is played in every seat rotati
 ![Ablation effects](docs/rl/charts/ablation_effects.png)
 
 **Honest limits.** Every opponent it was measured against shares the heuristic bot's
-valuation model somewhere, and its bargaining is partly tuned to that model; LLM players
-are the first fully independent test, and the paid showcase is prepared but not run.
+valuation model somewhere, and its bargaining is partly tuned to that model. LLM players
+are the first independent test: against two Claude Haiku 5.5 seats and the heuristic bot
+it won 60.3% [48.4%, 71.4%] of 63 games (Haiku 14.3% and 6.3%, the bot 19.0%), and its
+138 deals gained it +9.6 points of win probability each [+7.1, +12.4], while the Haiku
+seats lost 3.2 to 3.4 points per deal. Haiku countered 47% of its 412 offers instead of
+refusing, so it sent 9.6 proposals per game instead of 25, and 21% became deals. Those
+deal values come from rollouts played by heuristic bots, not by Haiku.
 The headline is one training seed (one seed moves a run by about 1 point). Target A of
 Phase 9 (beating three `always_buy` bots, where nobody trades) was never reached: 25.0%.
 
 **In the viewer** the RL agent's "reasoning" is its three most likely options with their
 probabilities and its value estimate, at every decision with a real choice. The menu has
-two games from the offline tournament (with Monte Carlo values) and four Phase 12 games
-against three heuristic bots.
+one showcase game against Claude Haiku (`seed12_rot1`: Haiku turns down 500 fl. for
+Groningen, asks 750 fl. itself, and the agent takes it: +47 points of win probability for
+the agent, −74 for Haiku), two games from the offline tournament (all three with Monte
+Carlo values) and four Phase 12 games against three heuristic bots.
 
 **Commands** (`uv sync --all-groups` first; the checkpoints are in `models/`):
 

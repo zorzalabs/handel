@@ -104,7 +104,10 @@ More: `charts/strategy_buying.png`, `charts/strategy_jail_cash.png`, `charts/val
   valuation model somewhere, the candidate offers are priced around that model, and the
   fair-value judge plays heuristic bots in its rollouts. The agent's bargaining (a price ladder
   one step per round, reading "would the bot accept") is partly tuned to that model. LLM players
-  are the first fully independent test (Phase 14).
+  are the first independent test: in the paid Phase 14 showcase against two Claude Haiku 5.5
+  seats and the heuristic bot it won 60.3% [48.4%, 71.4%] of 63 games, and its deals gained it
+  +9.6 points each [+7.1, +12.4] (still judged by heuristic-bot rollouts). Few games, so a wide
+  interval.
 * **Proposal spam.** Where the answer is usually no (self-play, `tough` bots) the Phase 12 agent
   proposes about once every three turns, 96% to 97% refused. A refusal costs nothing in the game.
   Against LLM seats every proposal is a paid call; the refusal cost (B5) is the fix to use.
@@ -122,7 +125,7 @@ More: `charts/strategy_buying.png`, `charts/strategy_jail_cash.png`, `charts/val
 1. **Train with the refusal cost from the start of Phase 12** (or a smaller one, 0.003 to 0.005),
    for 300M decisions: the agent to put in front of LLM seats.
 2. **Drop the heuristic pick prior** (B4) in that run, since it did not help.
-3. **Evaluate against independent players:** LLM seats (Phase 14), and a fair-value judge with the
-   agent itself in the rollout seats.
+3. **Evaluate against independent players:** more LLM games than the 63 of the Phase 14
+   showcase, and a fair-value judge with the agent itself in the rollout seats.
 4. **More seeds for the main run** (3 or more) before quoting a single headline number as final.
 5. **A learning rate floor** instead of decay to 0: the Phase 12 curve was still rising at the end.

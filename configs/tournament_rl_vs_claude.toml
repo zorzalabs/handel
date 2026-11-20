@@ -3,6 +3,9 @@
 #
 # It spends real money: check the budget below before running it.
 #
+# DONE: ran once on Nov 20, 2026 (63 of 80 games, EUR 2.93, budget used up). Do not run again;
+# the results are in results/tournament_rl_vs_claude and in the README.
+#
 # Hard budget: EUR 3. The tournament stops by itself before a game it cannot pay for,
 # and a paid call that would go past the budget is refused (Phase 5). Re-running the same
 # command resumes; interrupted games replay from the reply cache for free.

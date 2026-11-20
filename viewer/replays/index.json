@@ -1,5 +1,9 @@
 [
  {
+  "file": "rl_vs_claude_seed12_rot1.json",
+  "title": "RL vs Claude Haiku showcase · seed12_rot1: haiku-a, haiku-b, heuristic, rl-agent (winner rl-agent, 91 rounds)"
+ },
+ {
   "file": "claude_tournament_seed1_rot0.json",
   "title": "Claude tournament · seed1_rot0: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 56 rounds)"
  },
