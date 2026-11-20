@@ -143,8 +143,14 @@ def trace_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: i
 
 def record_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: int = 0,
                 deterministic: bool = False, config: GameConfig | None = None,
-                trade_mode: str = DEFAULT_TRADE_MODE, label: str = "RL agent") -> dict:
-    """Play one game with the RL agent in ``seat`` and return its record for ``handel-export``."""
+                trade_mode: str = DEFAULT_TRADE_MODE, label: str = "RL agent", checkpoint: str = "") -> dict:
+    """Play one game with the RL agent in ``seat`` and return its record for ``handel-export``.
+
+    The agent is an ``RLSeat`` (Phase 14): the same decisions as ``RLAgent``, plus its top
+    options and value estimate at every decision, which the viewer shows.
+    """
+    from .seat import RLSeat  # imports this module's action_name
+
     n = len(opponents) + 1
     if not 0 <= seat < n:
         raise ValueError(f"seat must be 0 to {n - 1}")
@@ -153,8 +159,9 @@ def record_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: 
     seats = []
     for i in range(n):
         if i == seat:
-            agents.append(RLAgent(policy, bot_seed(seed, i), deterministic, trade_mode))
-            seats.append({"name": label, "type": "bot", "bot": f"rl ({trade_mode})"})
+            agents.append(RLSeat(policy, bot_seed(seed, i), deterministic, trade_mode, name=label))
+            seats.append({"name": label, "type": "rl", "checkpoint": checkpoint or f"rl ({trade_mode})",
+                          "trade_mode": trade_mode})
         else:
             name = names.pop(0)
             agents.append(make_opponent(name, bot_seed(seed, i)))
@@ -164,7 +171,7 @@ def record_game(policy: NumpyPolicy, opponents: list[str], seed: int = 0, seat: 
     negs = negotiations(state.log or [])
     return {"seed": seed, "config": {"game": asdict(cfg), "seats": seats}, "result": result.to_dict(),
             "rl_seat": seat, "trade_mode": trade_mode, "negotiation_summary": summary(negs),
-            "negotiations": negs, "transcripts": {}, "log": state.log}
+            "negotiations": negs, "transcripts": {seat: agents[seat].transcript}, "log": state.log}
 
 
 # --- Value head check -------------------------------------------------------------------
@@ -280,7 +287,8 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "record":
         ck = Path(args.policy)
         doc = record_game(NumpyPolicy.from_net(net), opponents, args.seed, args.seat, args.deterministic,
-                          config, trade_mode, label=f"RL agent ({ck.parent.name or ck.stem})")
+                          config, trade_mode, label=f"RL agent ({ck.parent.name or ck.stem})",
+                          checkpoint=str(ck) if ck.suffix == ".pt" else "")
         out = Path(args.out) if args.out else (ck.parent if ck.suffix == ".pt" else Path("runs/baselines")) \
             / "records" / f"game_{args.seed}.json"
         out.parent.mkdir(parents=True, exist_ok=True)

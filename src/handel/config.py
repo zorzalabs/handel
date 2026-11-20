@@ -18,10 +18,16 @@ Example (see ``configs/``)::
     [[seats]]
     type = "bot"
     bot = "heuristic"
+
+    [[seats]]             # a trained RL checkpoint (Phase 14; needs the ``rl`` dependency group)
+    type = "rl"
+    checkpoint = "models/handel_rl_final.pt"
+    sample = false        # false: always the most likely action
 """
 
 from __future__ import annotations
 
+import hashlib
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -31,6 +37,7 @@ from .bots import BOTS, make_bot
 from .engine.state import GameConfig
 from .llm.agent import LLMAgent
 from .llm.client import LLMClient, OpenRouterClient, OptionPickerClient, Price
+from .rl.trade import TRADE_MODES  # no torch in this module
 from .runner import bot_seed
 
 LLM_DEFAULTS: dict[str, Any] = {
@@ -56,11 +63,12 @@ FAKE_MODELS = {"fake/random": 0.0, "fake/sloppy": 0.3}
 
 @dataclass
 class SeatSpec:
-    kind: str  # "llm" or "bot"
+    kind: str  # "llm", "bot" or "rl"
     name: str
     model: str = ""
     bot: str = ""
     llm: dict[str, Any] = field(default_factory=dict)
+    rl: dict[str, Any] = field(default_factory=dict)  # checkpoint, sample, trade_mode, explain
 
 
 @dataclass
@@ -112,11 +120,47 @@ def parse_config(raw: dict[str, Any]) -> RunConfig:
                 raise ValueError(f"seat {i}: unknown keys {sorted(unknown)}")
             seats.append(SeatSpec("llm", s.get("name", model), model=model,
                                   llm={**llm_defaults, **overrides}))
+        elif kind == "rl":
+            seats.append(SeatSpec("rl", s.get("name", "rl"), rl=_rl_seat(i, s)))
         else:
-            raise ValueError(f"seat {i}: type must be 'llm' or 'bot'")
+            raise ValueError(f"seat {i}: type must be 'llm', 'bot' or 'rl'")
     if not 2 <= len(seats) <= 6:
         raise ValueError("a game needs 2 to 6 seats")
     return RunConfig(game, seats, pricing, usd_to_eur, raw)
+
+
+RL_SEAT_KEYS = {"checkpoint", "sample", "trade_mode", "explain"}
+
+
+def _rl_seat(i: int, s: dict[str, Any]) -> dict[str, Any]:
+    """Check an RL seat's keys without importing torch (that happens when the game starts)."""
+    unknown = set(s) - RL_SEAT_KEYS - {"type", "name"}
+    if unknown:
+        raise ValueError(f"seat {i}: unknown keys {sorted(unknown)} for an rl seat")
+    ckpt = s.get("checkpoint")
+    if not ckpt:
+        raise ValueError(f"seat {i}: rl seats need a checkpoint")
+    if not Path(ckpt).is_file():
+        raise ValueError(f"seat {i}: checkpoint {ckpt!r} not found")
+    mode = s.get("trade_mode")
+    if mode is not None and mode not in TRADE_MODES:
+        raise ValueError(f"seat {i}: trade_mode must be one of {sorted(TRADE_MODES)}")
+    return {"checkpoint": str(ckpt), "sample": bool(s.get("sample", False)), "trade_mode": mode,
+            "explain": bool(s.get("explain", True))}
+
+
+def checkpoint_digest(checkpoint: str | Path) -> str:
+    """First 16 hex digits of a checkpoint file's SHA-256 (written into tournament manifests)."""
+    return hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()[:16]
+
+
+def make_rl_agent(seat: SeatSpec, seed: int):  # noqa: ANN201 - an RLSeat; torch is imported only here
+    try:
+        from .rl.seat import make_rl_seat
+    except ImportError as e:
+        raise SystemExit(f"rl seats need the rl dependency group (uv sync --group rl): {e}") from None
+    return make_rl_seat(seat.rl["checkpoint"], seed, sample=seat.rl["sample"],
+                        trade_mode=seat.rl["trade_mode"], name=seat.name, explain=seat.rl["explain"])
 
 
 def request_params(llm: dict[str, Any]) -> dict[str, Any]:
@@ -141,6 +185,9 @@ def build_agents(cfg: RunConfig, seed: int, client: LLMClient | None = None,
     for i, seat in enumerate(cfg.seats):
         if seat.kind == "bot":
             agents.append(make_bot(seat.bot, bot_seed(seed, i)))
+            continue
+        if seat.kind == "rl":
+            agents.append(make_rl_agent(seat, bot_seed(seed, i)))
             continue
         if seat.model in FAKE_MODELS:
             seat_client: LLMClient = OptionPickerClient(bot_seed(seed, i), FAKE_MODELS[seat.model])

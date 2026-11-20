@@ -1,26 +1,34 @@
 [
  {
   "file": "claude_tournament_seed1_rot0.json",
-  "title": "seed1_rot0: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 56 rounds)"
+  "title": "Claude tournament · seed1_rot0: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 56 rounds)"
+ },
+ {
+  "file": "rl_tournament_seed1_rot1.json",
+  "title": "RL offline tournament · seed1_rot1: heuristic, always_buy, heuristic_notrade, rl-agent (winner rl-agent, 45 rounds)"
+ },
+ {
+  "file": "rl_tournament_seed5_rot2.json",
+  "title": "RL offline tournament · seed5_rot2: always_buy, heuristic_notrade, rl-agent, heuristic (winner rl-agent, 51 rounds)"
  },
  {
   "file": "claude_phase3_seed1.json",
-  "title": "seed1: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 71 rounds)"
+  "title": "Claude, Phase 3 · seed1: opus-5.5, sonnet-5.5, haiku-5.5, heuristic (winner haiku-5.5, 71 rounds)"
  },
  {
   "file": "rl_phase12_seed18.json",
-  "title": "seed18: heuristic (P0), heuristic (P1), RL agent (league_4p_full_s0), heuristic (P3) (winner RL agent (league_4p_full_s0), 34 rounds)"
+  "title": "RL vs 3 heuristic · seed18: heuristic (P0), heuristic (P1), RL agent (league_4p_full_s0), heuristic (P3) (winner RL agent (league_4p_full_s0), 34 rounds)"
  },
  {
   "file": "rl_phase12_seed21.json",
-  "title": "seed21: heuristic (P0), RL agent (league_4p_full_s0), heuristic (P2), heuristic (P3) (winner RL agent (league_4p_full_s0), 71 rounds)"
+  "title": "RL vs 3 heuristic · seed21: heuristic (P0), RL agent (league_4p_full_s0), heuristic (P2), heuristic (P3) (winner RL agent (league_4p_full_s0), 71 rounds)"
  },
  {
   "file": "rl_phase12_seed16.json",
-  "title": "seed16: RL agent (league_4p_full_s0), heuristic (P1), heuristic (P2), heuristic (P3) (winner RL agent (league_4p_full_s0), 82 rounds)"
+  "title": "RL vs 3 heuristic · seed16: RL agent (league_4p_full_s0), heuristic (P1), heuristic (P2), heuristic (P3) (winner RL agent (league_4p_full_s0), 82 rounds)"
  },
  {
   "file": "rl_phase12_seed7.json",
-  "title": "seed7: heuristic (P0), heuristic (P1), heuristic (P2), RL agent (league_4p_full_s0) (winner heuristic (P1), 95 rounds)"
+  "title": "RL vs 3 heuristic · seed7: heuristic (P0), heuristic (P1), heuristic (P2), RL agent (league_4p_full_s0) (winner heuristic (P1), 95 rounds)"
  }
 ]

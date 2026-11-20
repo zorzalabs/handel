@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import math
 import random
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +32,7 @@ from typing import Any
 Z95 = 1.959964
 MIN_CLUSTERS = 5  # fewer seeds (or games) than this: no bootstrap interval
 N_BOOT = 2000
+RECORD_CACHE = 64  # parsed game records kept in memory
 
 
 # --- Statistics -----------------------------------------------------------------------
@@ -122,7 +123,9 @@ class TournamentData:
     entrants: list[str]
     lines: list[dict]
     usd_to_eur: float = 0.92
-    _records: dict[str, dict | None] = field(default_factory=dict, repr=False)
+    # The most recently read records only: a big offline tournament (Phase 14, 2,000 games)
+    # would not fit in memory if every parsed record were kept.
+    _records: OrderedDict[str, dict | None] = field(default_factory=OrderedDict, repr=False)
 
     @property
     def seats(self) -> int:
@@ -130,11 +133,15 @@ class TournamentData:
 
     def record(self, line: dict) -> dict | None:
         gid = line["game_id"]
-        if gid not in self._records:
+        if gid in self._records:
+            self._records.move_to_end(gid)
+        else:
             rel = line.get("record")
             p = self.path / rel if rel else None
             self._records[gid] = (json.loads(p.read_text(encoding="utf-8"))
                                   if p is not None and p.exists() else None)
+            while len(self._records) > RECORD_CACHE:
+                self._records.popitem(last=False)
         return self._records[gid]
 
     def value_path(self, line: dict) -> Path | None:
@@ -431,11 +438,20 @@ def _game_clusters(items: list[OfferJudgement], fn: Callable[[OfferJudgement], f
 
 
 def ensure_values(data: TournamentData, rollouts: int = 300, workers: int | None = None,
-                  timeline_every: int = 5, echo: Callable[[str], None] = print) -> int:
-    """Run the Phase 4 fair-value estimator for records that have no report yet."""
+                  timeline_every: int = 5, echo: Callable[[str], None] = print,
+                  seeds: int | None = None) -> int:
+    """Run the Phase 4 fair-value estimator for records that have no report yet.
+
+    ``seeds`` limits it to the games of the first N seeds (all their rotations), for
+    tournaments too big to value whole; trade quality then covers those games only.
+    """
     from .fairvalue import Estimator, Settings, evaluate_record
 
-    todo = [x for x in data.lines if data.value_path(x) is not None
+    lines = data.lines
+    if seeds is not None:
+        keep = set(sorted({x["seed"] for x in lines})[:seeds])
+        lines = [x for x in lines if x["seed"] in keep]
+    todo = [x for x in lines if data.value_path(x) is not None
             and not data.value_path(x).exists() and data.record(x) is not None]  # type: ignore[union-attr]
     if not todo:
         return 0
@@ -538,6 +554,10 @@ def report_markdown(data: TournamentData) -> str:
         lines += ["No fair-value reports yet. Run `handel-analyze <dir> --value` (free, no API calls; "
                   "a few minutes per LLM game).", ""]
     else:
+        valued = sum(1 for x in data.lines if (vp := data.value_path(x)) is not None and vp.exists())
+        if valued < n:
+            lines += [f"Only {valued} of the {n} games were valued (`--value-seeds`); this section "
+                      "describes those games.", ""]
         lines += [f"{len(js)} offers valued with heuristic-bot rollouts. An offer is *good* (or *bad*) "
                   "for the player answering it when accepting raises (or lowers) that player's win "
                   "probability by more than two standard errors; the rest are unclear. Gains are in "
@@ -574,6 +594,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--value", action="store_true",
                     help="first run the fair-value estimator on records without a report")
     ap.add_argument("--rollouts", type=int, default=300, help="rollouts per world for --value")
+    ap.add_argument("--value-seeds", type=int, default=None, metavar="N",
+                    help="with --value: value only the games of the first N seeds (big tournaments)")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--no-charts", action="store_true")
     ap.add_argument("--out", default=None, help="output directory (default <results>/analysis)")
@@ -583,7 +605,7 @@ def main(argv: list[str] | None = None) -> None:
     if not data.lines:
         raise SystemExit(f"no finished games in {args.results}")
     if args.value:
-        n = ensure_values(data, rollouts=args.rollouts, workers=args.workers)
+        n = ensure_values(data, rollouts=args.rollouts, workers=args.workers, seeds=args.value_seeds)
         print(f"valued {n} game(s)")
     out = Path(args.out) if args.out else data.path / "analysis"
     out.mkdir(parents=True, exist_ok=True)

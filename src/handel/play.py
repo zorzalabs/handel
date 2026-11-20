@@ -66,7 +66,9 @@ def game_record(cfg: RunConfig, seed: int, result: GameResult, state: GameState,
         "system_prompt": system_prompt(cfg.game.max_rounds, cfg.game.max_counters),
         "negotiation_summary": summary(negs),
         "negotiations": negs,
-        "transcripts": {i: a.transcript for i, a in enumerate(agents) if isinstance(a, LLMAgent)},
+        # LLM seats' prompts and replies; RL seats' top options and value estimates (Phase 14)
+        "transcripts": {i: a.transcript for i, a in enumerate(agents)
+                        if isinstance(getattr(a, "transcript", None), list)},
         "log": state.log,
     }
 
@@ -83,7 +85,11 @@ def summarize(cfg: RunConfig, result: GameResult) -> str:
     for i, seat in enumerate(cfg.seats):
         line = f"  P{i} {seat.name:<24} net worth {result.net_worth[i]:>6}"
         st = (result.agent_stats or [None] * len(cfg.seats))[i]
-        if st:
+        if st and st.get("kind") == "rl":
+            line += (f" | decisions {st['decisions']:>3}, trades proposed {st['proposals']}, "
+                     f"deals {st['deals']}, offers answered {st['offers_accepted']} accepted / "
+                     f"{st['offers_rejected']} rejected / {st['offers_countered']} countered, cost $0")
+        elif st:
             cached = st.get("cached_tokens", 0) / st["prompt_tokens"] if st["prompt_tokens"] else 0.0
             line += (f" | decisions {st['decisions']:>3}, illegal {st['illegal_move_rate']:.1%}, "
                      f"fallbacks {st['fallbacks']}, tokens {st['prompt_tokens']}+"
@@ -128,8 +134,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="print a status line every N rounds (0 = quiet; default 5)")
     args = ap.parse_args(argv)
 
-    load_dotenv()
     cfg = load_config(args.config)
+    if cfg.needs_api:  # offline configs (bots, rl seats, fake models) never read the key
+        load_dotenv()
     out = Path(args.out) if args.out else Path("results") / Path(args.config).stem
     grand = 0.0
     for seed in range(args.seed, args.seed + args.games):

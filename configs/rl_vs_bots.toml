@@ -1,0 +1,29 @@
+# The final RL agent against three heuristic bots, offline (no API key, no cost).
+#   uv run handel-play configs/rl_vs_bots.toml --seed 1 --games 3
+#   uv run handel-export results/rl_vs_bots/game_1.json        # watch it in the viewer
+# Any seat can be swapped for an LLM seat (see configs/claude_trio.toml) or another checkpoint.
+# Needs the rl dependency group (uv sync --group rl).
+
+[game]
+max_rounds = 150
+
+[[seats]]
+type = "rl"
+name = "rl-agent"
+checkpoint = "models/handel_rl_final.pt"
+sample = false          # true: sample from the policy instead of taking the most likely action
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+name = "heuristic-1"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+name = "heuristic-2"
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+name = "heuristic-3"

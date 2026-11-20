@@ -81,6 +81,9 @@
     if (m.valued) notes.push("Win probabilities and offer values are Monte Carlo estimates: every seat is " +
       "replayed by the heuristic bot from that point (Phase 4), so they show value if the rest of the game " +
       "were played like the bot.");
+    if (m.players.some((p) => p.kind === "rl")) notes.push("For the RL agent the Reasoning tab shows its three " +
+      "most likely options with their probabilities and its value estimate. The win chance assumes a table of " +
+      "players as strong as itself, so it reads low against weaker players.");
     if (m.redactions) notes.push(`${m.redactions} uses of a brand-like word in model-written text are shown as "full set".`);
     $("footnote").textContent = notes.join(" ");
     $("scrubber").max = String(doc.frames.length - 1);
@@ -205,7 +208,7 @@
       card.id = "player-" + p;
       const row = el("div", "row");
       row.append(badge(p), el("span", "pname", pl.name));
-      const kind = el("div", "kind", pl.kind === "llm" ? pl.model : `bot · ${pl.model}`);
+      const kind = el("div", "kind", pl.kind === "llm" ? pl.model : pl.kind === "rl" ? `RL agent · ${pl.model}` : `bot · ${pl.model}`);
       const money = el("div", "money");
       money.append(el("b", "cash"), el("span", "worth muted small"));
       card.append(row, kind, money, el("div", "status"));
@@ -402,14 +405,40 @@
     const root = $("panel-think");
     root.replaceChildren();
     const notes = S.doc.reasoning.filter((r) => r.frame <= i).slice(-60).reverse();
-    if (!notes.length) { root.append(el("div", "empty", "The LLM players' stated reasoning appears here.")); return; }
+    if (!notes.length) {
+      root.append(el("div", "empty", "The LLM players' stated reasoning and the RL agent's top options appear here."));
+      return;
+    }
     for (const r of notes) {
-      const n = el("div", "note");
+      const n = el("div", r.rl ? "note rl" : "note");
       const who = el("div", "who");
       who.append(badge(r.p), el("span", "", `${S.doc.meta.players[r.p].name} · ${r.kind} · round ${S.doc.frames[r.frame].round + 1}`));
-      n.append(who, el("p", "", r.text));
+      n.append(who);
+      if (r.rl) n.append(rlOptions(r.rl));
+      else n.append(el("p", "", r.text));
       root.append(n);
     }
+  }
+
+  // An RL decision: its top options as probability bars, and its value estimate.
+  function rlOptions(rl) {
+    const box = el("div", "rl-box");
+    for (const o of rl.top) {
+      const row = el("div", o.action === rl.chosen ? "opt chosen" : "opt");
+      const bar = el("span", "bar");
+      const fill = el("i");
+      fill.style.width = `${Math.max(1, Math.round(o.p * 100))}%`;
+      bar.append(fill);
+      row.append(el("span", "lbl", o.action), bar, el("span", "pct", `${Math.round(o.p * 100)}%`));
+      box.append(row);
+    }
+    if (!rl.top.some((o) => o.action === rl.chosen)) box.append(el("div", "opt chosen", `took: ${rl.chosen}`));
+    const v = el("div", "rl-value");
+    const sign = rl.value >= 0 ? "+" : "";
+    v.append(el("span", "", `value ${sign}${rl.value.toFixed(2)}`),
+      el("span", "muted", ` · about ${Math.round(rl.win_chance * 100)}% to win at a table of equals`));
+    box.append(v);
+    return box;
   }
 
   function renderLog(i) {

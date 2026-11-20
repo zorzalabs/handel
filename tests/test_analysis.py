@@ -132,3 +132,22 @@ def test_cli_without_games_explains(tmp_path):
     (tmp_path / "games.jsonl").write_text("")
     with pytest.raises(SystemExit, match="no finished games"):
         analysis.main([str(tmp_path)])
+
+
+def test_value_seeds_values_only_the_first_seeds_and_the_report_says_so(tmp_path, monkeypatch):
+    """Phase 14: big tournaments value a subset of seeds; records are not all kept in memory."""
+    raw = {"tournament": {"seeds": 2, "rotate": 2}, "game": {"max_rounds": 25},
+           "seats": [{"type": "bot", "bot": "heuristic", "name": "h1"}, {"type": "bot", "bot": "heuristic", "name": "h2"},
+                     {"type": "bot", "bot": "always_buy"}]}
+    Tournament(parse_tournament(raw), tmp_path, echo=lambda m: None).run()
+    monkeypatch.setattr(analysis, "RECORD_CACHE", 2)
+    data = analysis.load(tmp_path)
+    assert analysis.ensure_values(data, rollouts=4, workers=1, timeline_every=0, echo=lambda m: None,
+                                  seeds=1) == 2
+    valued = sorted(x["game_id"] for x in data.lines if data.value_path(x).exists())
+    assert valued == ["seed1_rot0", "seed1_rot1"]
+    assert len(data._records) <= 2
+    negotiation_table(data)  # reads all four records through the small cache
+    assert len(data._records) <= 2
+    assert analysis.judgements(data)  # the heuristic bots trade in these games
+    assert "Only 2 of the 4 games were valued" in analysis.report_markdown(data)

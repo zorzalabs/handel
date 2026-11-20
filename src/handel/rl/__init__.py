@@ -25,4 +25,6 @@ Modules (import them directly; this package imports nothing so that
 * ``candidates``: the candidate offers the network chooses from (Phase 12), their features and messages
 * ``deals``: fair value report on the deals a policy proposed (spam and kingmaking checks)
 * ``duel``: two checkpoints play each other, each in its own trade mode
+* ``seat``: ``type = "rl"`` seats in play and tournament configs (Phase 14): stats and the viewer's notes
+* ``showcase_cost``: cost estimate of a tournament with paid LLM seats, without API calls (Phase 14)
 """

@@ -1,7 +1,8 @@
 # Handel
 
-**A benchmark where LLM agents play an original property-trading board game against each
-other and against rule-based bots, built to measure how well they negotiate trades.**
+**A benchmark where LLM agents, rule-based bots and a self-play reinforcement learning
+agent play an original property-trading board game, built to measure how well they
+negotiate trades.**
 
 ![A replayed game: Claude Opus, Sonnet and Haiku against a heuristic bot. Deals pause on the offer, the chat message and its Monte Carlo value.](docs/demo.gif)
 
@@ -37,7 +38,7 @@ python3 -m http.server 8765 --directory viewer   # then open http://localhost:87
 ```
 
 The viewer ships with two real games between Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and
-the heuristic bot. The folder has no build step, so it can also be hosted as-is, for
+the heuristic bot, and six games of the RL agent against bots. The folder has no build step, so it can also be hosted as-is, for
 example on GitHub Pages.
 * **Controls:** space plays and pauses, the arrow keys step, and `[` / `]` jump between
   negotiations.
@@ -68,15 +69,107 @@ behaviours still show up clearly, and they repeat:
   it faced correctly.
 * **The models barely use promises:** 4 in 42 negotiations, all from Opus.
 
-**Status:** Phases 1–7 are complete: engine and bots, LLM agents, negotiation, fair value,
-tournaments, analysis, and the replay viewer with this README. Each phase has its own
-section below.
+**Status:** Phases 1–14 are complete. Phases 1–7 built the benchmark: engine and bots, LLM
+agents, negotiation, fair value, tournaments, analysis and the replay viewer. Phases 8–14
+added a self-play reinforcement learning agent and put it into the benchmark (next
+section). Each phase has its own section below; the RL write-up is
+[`docs/rl/RESULTS.md`](docs/rl/RESULTS.md).
+
+## The RL agent (Phases 8–14)
+
+![The RL agent (P3) against three bots in the offline tournament: after offers of 650 and 800 fl are refused, it swaps Haarlem for Eindhoven plus 140 fl, worth +81 points of win probability to it. Its three most likely options and its value estimate are shown next to each of its offers.](docs/rl_demo.gif)
+
+A small neural network (two layers of 256, about 1.1 MB) that learned Handel by playing
+against bots and against older copies of itself. PPO with action masking and the self-play
+league are written from scratch in PyTorch and trained on a laptop CPU: 875 million
+decisions, about 19 hours, no GPU and no API calls. Trading is learned in stages: first the
+agent only buys, builds and manages its money, then it learns to answer offers, then to
+propose its own trades by choosing among up to 16 generated candidate offers. It plays
+through the same `Agent` interface as the bots and the LLMs, so it sits in tournaments, the
+analysis and the viewer like any other seat.
+
+| Benchmark | Result (95% CI) | Games |
+|---|---|---|
+| Final agent vs 3 `heuristic` bots (fair share 25%), sampling from the policy | **57.2%** [55.9%, 58.6%] | 4,000 |
+| Same games, always the most likely action (how it plays in tournaments) | 57.2% [55.8%, 58.5%] | 4,000 |
+| Offline tournament: RL agent vs `heuristic`, `heuristic_notrade`, `always_buy` | **64.6%** [62.3%, 66.8%] | 2,000 |
+| Same tournament with a second `heuristic` bot in the RL agent's seat | 36.4% [34.5%, 38.1%] | 2,000 |
+| Paired difference, RL agent minus heuristic bot in that seat | +28.3 points [+26.1, +30.5] | 2,000 |
+| Two player duel against the Phase 10 agent (self-play, no own trading) | 74.0% [72.2%, 75.8%] | 2,000 |
+| Showcase against Claude Haiku 5.5 (paid, EUR 3 budget) | not run yet | – |
+
+Intervals are bootstrapped over seeds; every seed is played in every seat rotation.
+
+![Win rate through the training stages](docs/rl/charts/stages_curve.png)
+
+**What it learned, and what mattered** (details and every number's source in
+[`docs/rl/RESULTS.md`](docs/rl/RESULTS.md)):
+* **Almost all of its edge is trading.** On the same games, its own proposals are worth
+  +17 points and learned answers to offers about +5; buying, building, jail and money
+  together moved only +2.4 points from Phase 10 to Phase 12.
+* **It completes sets early through lopsided trades and builds at once.** Its first
+  complete set comes in round 16 (the heuristic bot's in round 20), and it builds the
+  next house 84–86% of the time at every level, with no "stop at 3 houses". It runs on
+  less cash than the bot and mortgages about 10 times per game to build sooner.
+* **The self-play league was the one idea with a large effect** (Phase 13 ablations, two
+  seeds each). Without it the agent fits heuristic-type bots (+6 points against `tough`
+  bots) and loses to learned players (−3 to −5 points). A small cost per refused proposal
+  halves proposal spam for about 1.4 points.
+* **It spams players who never say yes.** In the offline tournament it made 25 proposals
+  per game (median 12, at most 147), mostly to `always_buy` and `heuristic_notrade`, which
+  never accept; 1.6 per game became deals. Its deals were good for it: on the 20 games valued
+  by Monte Carlo it gained +5.5 points of win probability per deal [−2.8, +14.2] (36 deals),
+  and the bot that traded with it most, `heuristic_notrade`, lost 9.6 points of edge per
+  deal [−30.1, −0.5].
+* **Its value head knows when it is winning** (Brier score 0.130 against 0.251 for "share
+  of net worth"), but it rates every position as if all opponents were as strong as
+  itself, so it reads about 17 points low against heuristic bots.
+
+![What each part of trading is worth](docs/rl/charts/trade_modes.png)
+
+![Ablation effects](docs/rl/charts/ablation_effects.png)
+
+**Honest limits.** Every opponent it was measured against shares the heuristic bot's
+valuation model somewhere, and its bargaining is partly tuned to that model; LLM players
+are the first fully independent test, and the paid showcase is prepared but not run.
+The headline is one training seed (one seed moves a run by about 1 point). Target A of
+Phase 9 (beating three `always_buy` bots, where nobody trades) was never reached: 25.0%.
+
+**In the viewer** the RL agent's "reasoning" is its three most likely options with their
+probabilities and its value estimate, at every decision with a real choice. The menu has
+two games from the offline tournament (with Monte Carlo values) and four Phase 12 games
+against three heuristic bots.
+
+**Commands** (`uv sync --all-groups` first; the checkpoints are in `models/`):
+
+```bash
+uv run handel-play configs/rl_vs_bots.toml --seed 1           # play it against 3 heuristic bots
+uv run handel-rl-eval models/handel_rl_final.pt --opponents heuristic,heuristic,heuristic --games 4000 --rotate --seed 0
+uv run handel-tournament configs/tournament_rl_offline.toml   # 2,000 games, about 2 minutes
+uv run handel-analyze results/tournament_rl_offline --value --value-seeds 5   # trade quality on 20 games
+uv run handel-train configs/rl/league_4p_full.toml            # train the last stage (about 9 hours)
+uv run python -m handel.rl.showcase_cost configs/tournament_rl_vs_claude.toml   # cost estimate, no API calls
+```
+
+A seat in any play or tournament config can be an RL checkpoint:
+
+```toml
+[[seats]]
+type = "rl"
+checkpoint = "models/handel_rl_final.pt"
+sample = false   # always the most likely action
+```
+
+The seat reports decisions, trades proposed and deals per game like the LLM seats report
+tokens and cost (its cost is always 0). The full training curriculum, the tools and every
+run are in [`configs/rl/README.md`](configs/rl/README.md), and
+[`docs/rl/`](docs/rl/).
 
 ## Setup
 
 ```bash
 uv sync
-uv run pytest                    # 285 tests, ~35 s (includes the 10k-game benchmark)
+uv run pytest                    # 473 tests with all groups, ~2.5 min (RL tests skip without torch)
 uv run pytest -m "not slow"      # skip the benchmark
 uv run handel-sim --games 10000  # parallel bot simulation with a summary
 uv run handel-play configs/offline_demo.toml --games 3   # LLM pipeline, offline fake models
@@ -87,12 +180,13 @@ uv run handel-tournament configs/tournament_offline.toml # 100-game offline tour
 uv run handel-tournament configs/tournament_claude.toml  # 40 Claude games, ~EUR 46, resumable
 uv run handel-tournament configs/tournament_cheap.toml   # Sonnet + Haiku, 40 games, ~EUR 12
 uv sync --group analysis                                 # matplotlib + Jupyter for charts
+uv sync --all-groups                                     # also torch + numpy for the RL agent
 uv run handel-analyze results/tournament_cheap --value   # report, CIs, trade quality, charts
 uv run handel-export results/tournament_claude/records/seed1_rot0.json   # game -> viewer
 ```
 
-`.env` is git-ignored and read automatically; a key there overrides one exported in the
-shell. OpenRouter *management* keys cannot call models (every request returns 401).
+`.env` is git-ignored and read automatically when a config has a paid LLM seat (offline
+configs never read it); a key there overrides one exported in the shell. OpenRouter *management* keys cannot call models (every request returns 401).
 `handel-play` prints a status line every 5 rounds (`--progress N`, `0` for quiet).
 
 ## LLM agents (Phase 2)
@@ -492,8 +586,8 @@ it out: the table still holds two LLMs, so LLM-vs-LLM negotiation stays. To try 
   - It writes one frame per decision: board, cash, positions and readable event lines.
   - It also attaches the negotiation threads, with messages, promises and, when a
     `.value.json` sits next to the record, each offer's Monte Carlo value.
-  - It attaches the LLMs' stated reasoning, and adds the replay to
-    `viewer/replays/index.json`.
+  - It attaches the LLMs' stated reasoning (for an RL seat: its top options and value
+    estimate, Phase 14), and adds the replay to `viewer/replays/index.json`.
 * **`viewer/`** is a static page with no dependencies and no build step:
   - the board, with original colour bands, numbered owner badges, buildings and tokens;
   - player cards;
@@ -534,6 +628,8 @@ src/handel/
   charts.py     matplotlib charts for the report and notebook
   export.py     record -> replay JSON for the web viewer + handel-export CLI
   gif.py        replay -> animated GIF + handel-gif CLI
+  rl/           the RL agent (Phases 8-14): observation, actions, policy, PPO, league,
+                trade modes and candidates, evaluation and analysis tools, RL seats (seat.py)
 viewer/         static replay viewer (index.html, app.js, style.css, replays/)
 notebooks/      analysis.ipynb
   runner.py     play_game (agent loop), continue_game (rollouts), simulate_many

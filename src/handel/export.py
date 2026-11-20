@@ -5,7 +5,10 @@ frame is a verified game state. One frame is written per decision: the board,
 cash and positions at that moment plus readable lines for the events since the
 previous frame. Negotiations (with messages, promises and, when a fair-value
 report sits next to the record, each offer's value) and the LLM players'
-stated reasoning are attached to the frames where they happened.
+stated reasoning are attached to the frames where they happened. For RL
+seats (Phase 14) the "reasoning" is the network's three most likely options
+with their probabilities and its value estimate; only the decisions worth
+reading are kept (see ``rl_note_worth_showing``) unless ``all_rl=True``.
 
 By default, the brand-like word that models use for a complete colour set is
 shown as "full set" in model-written text (messages, promises, reasoning):
@@ -133,13 +136,32 @@ def _player_names(record: dict) -> tuple[list[str], list[dict]]:
     for i, name in enumerate(agents):
         s = seats[i] if i < len(seats) else {}
         kind = s.get("type", "bot")
-        players.append({"name": s.get("name") or name, "kind": kind,
-                        "model": s.get("model", "") if kind == "llm" else s.get("bot", name)})
+        if kind == "llm":
+            model = s.get("model", "")
+        elif kind == "rl":
+            model = Path(s.get("checkpoint", "")).name or "checkpoint"
+        else:
+            model = s.get("bot", name)
+        players.append({"name": s.get("name") or name, "kind": kind, "model": model})
     return [p["name"] for p in players], players
 
 
+RL_SURE = 0.98  # an RL decision whose chosen option had at least this probability is routine
+
+
+def rl_note_worth_showing(rl: dict, kind: str) -> bool:
+    """Keep RL decisions with a real choice: trades, purchases, and anything below ``RL_SURE``."""
+    if kind in ("respond", "buy"):
+        return True
+    chosen = rl.get("chosen", "")
+    if chosen.startswith(("Propose", "Counter")):
+        return True
+    top = rl.get("top") or []
+    return bool(top) and top[0]["p"] < RL_SURE
+
+
 def export_replay(record: dict, value_report: dict | None = None,
-                  keep_wording: bool = False) -> dict[str, Any]:
+                  keep_wording: bool = False, all_rl: bool = False) -> dict[str, Any]:
     """Build the viewer's replay document from a game record."""
     red = Redactor(not keep_wording)
     log = record["log"]
@@ -215,18 +237,30 @@ def export_replay(record: dict, value_report: dict | None = None,
     for seat_key, entries in (record.get("transcripts") or {}).items():
         seat = int(seat_key)
         cursor = 0
+        prev_rl: int | None = None  # turn of the previous RL entry
         for e in entries:
-            for k in range(cursor, len(decision_frames)):
+            # An RL entry is exactly one decision, so the next entry of the same turn is a later
+            # frame. An LLM entry may cover a plan of several moves: it keeps the turn's first frame.
+            start = cursor + 1 if e.get("rl") is not None and prev_rl == e["turn"] else cursor
+            for k in range(start, len(decision_frames)):
                 if decision_frames[k] == (e["turn"], seat):
                     cursor = k
                     break
             else:
                 continue
+            prev_rl = e["turn"] if e.get("rl") is not None else None
             text = e.get("reasoning") or ""
+            rl = e.get("rl")
+            if rl is not None and not all_rl and not rl_note_worth_showing(rl, e["kind"]):
+                continue
             if text:
                 # shown with the frame that holds the decision's outcome
-                reasoning.append({"frame": min(cursor + 1, len(frames) - 1), "p": seat, "kind": e["kind"], "text": red(text[:600]),
-                                  "fallback": bool(e.get("fallback"))})
+                note = {"frame": min(cursor + 1, len(frames) - 1), "p": seat, "kind": e["kind"], "text": red(text[:600]),
+                        "fallback": bool(e.get("fallback"))}
+                if rl is not None:
+                    note["rl"] = {"top": rl["top"], "chosen": rl["chosen"], "value": rl["value"],
+                                  "win_chance": rl["win_chance"]}
+                reasoning.append(note)
     reasoning.sort(key=lambda r: (r["frame"], r["p"]))
 
     result = record.get("result") or {}
@@ -295,13 +329,15 @@ def main(argv: list[str] | None = None) -> None:
                     help="fair-value report (default: <record>.value.json if it exists)")
     ap.add_argument("--keep-wording", action="store_true",
                     help="keep model-written text verbatim (no rewording to 'full set')")
+    ap.add_argument("--all-rl", action="store_true",
+                    help="keep every RL decision in the reasoning panel, not only those with a real choice")
     args = ap.parse_args(argv)
 
     path = Path(args.record)
     record = json.loads(path.read_text(encoding="utf-8"))
     vpath = Path(args.value) if args.value else path.with_suffix(".value.json")
     value = json.loads(vpath.read_text(encoding="utf-8")) if vpath.exists() else None
-    doc = export_replay(record, value, keep_wording=args.keep_wording)
+    doc = export_replay(record, value, keep_wording=args.keep_wording, all_rl=args.all_rl)
     out = Path(args.out) if args.out else Path("viewer/replays") / f"{path.parent.parent.name}_{path.stem}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")

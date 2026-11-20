@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import RunConfig, build_agents, parse_config
+from .config import RunConfig, build_agents, checkpoint_digest, parse_config
 from .llm.cache import Budget, BudgetExceeded, CachingClient, ResponseStore, Stopped
 from .llm.client import LLMClient, LLMFatalError, OpenRouterClient
 from .negotiation import negotiations, summary
@@ -122,6 +122,11 @@ def rotated_config(run: RunConfig, lineup: tuple[int, ...]) -> RunConfig:
     return RunConfig(run.game, [run.seats[k] for k in lineup], run.pricing, run.usd_to_eur, raw)
 
 
+def rl_checkpoint_digests(run: RunConfig) -> dict[str, str]:
+    """Entrant name -> checkpoint digest for RL seats (empty without RL seats)."""
+    return {s.name: checkpoint_digest(s.rl["checkpoint"]) for s in run.seats if s.kind == "rl"}
+
+
 def config_hash(raw: dict[str, Any]) -> str:
     """Hash of everything that changes how games are played (not seeds, budget or pricing)."""
     core = {k: raw.get(k) for k in ("game", "llm", "seats")}
@@ -199,6 +204,7 @@ class Tournament:
 
     def _check_manifest(self, n_games: int) -> None:
         path = self.out / "tournament.json"
+        digests = rl_checkpoint_digests(self.spec.run)
         if path.exists():
             old = json.loads(path.read_text(encoding="utf-8"))
             if old.get("config_hash") != self.hash and not self.force:
@@ -206,10 +212,16 @@ class Tournament:
                     f"{self.out} holds a tournament with a different game/llm/seats config "
                     f"(hash {old.get('config_hash')} vs {self.hash}). Use another --out, or "
                     "--force to mix them.")
+            if old.get("rl_checkpoints", digests) != digests and not self.force:
+                raise SystemExit(
+                    f"{self.out}: an RL checkpoint file changed since the earlier games "
+                    f"({old.get('rl_checkpoints')} vs {digests}). Use another --out, or --force to mix them.")
         manifest = {"name": self.spec.name, "config_hash": self.hash, "entrants": self.spec.entrants,
                     "seeds": [self.spec.seeds[0], self.spec.seeds[-1]],
                     "rotations": self.spec.rotations, "games": n_games,
                     "budget_eur": self.spec.budget_eur, "config": self.spec.run.raw}
+        if digests:
+            manifest["rl_checkpoints"] = digests
         _write_atomic(path, json.dumps(manifest, ensure_ascii=False, indent=1))
 
     def _client(self) -> LLMClient:
@@ -426,6 +438,29 @@ def standings(lines: list[dict], entrants: list[str]) -> list[dict]:
     return out
 
 
+def rl_lines(lines: list[dict]) -> list[str]:
+    """Per RL entrant: decisions, trades proposed and deals per game, offers answered (cost is 0)."""
+    acc: dict[str, dict[str, int]] = {}
+    for x in lines:
+        for seat, name in enumerate(x["lineup"]):
+            st = (x.get("agent_stats") or [None] * len(x["lineup"]))[seat]
+            if not st or st.get("kind") != "rl":
+                continue
+            a = acc.setdefault(name, {"games": 0})
+            a["games"] += 1
+            for k in ("decisions", "proposals", "deals", "offers_accepted", "offers_rejected", "offers_countered"):
+                a[k] = a.get(k, 0) + st.get(k, 0)
+    out = []
+    for name, a in acc.items():
+        g = a["games"]
+        answered = a["offers_accepted"] + a["offers_rejected"] + a["offers_countered"]
+        out.append(f"  {name} (RL): {a['decisions'] / g:.0f} decisions, {a['proposals'] / g:.1f} trades "
+                   f"proposed and {a['deals'] / g:.1f} deals per game; {answered} offers answered "
+                   f"({a['offers_accepted']} accepted, {a['offers_rejected']} rejected, "
+                   f"{a['offers_countered']} countered); cost $0")
+    return out
+
+
 def format_standings(lines: list[dict], entrants: list[str], usd_to_eur: float) -> str:
     rows = standings(lines, entrants)
     n = len(lines)
@@ -441,6 +476,7 @@ def format_standings(lines: list[dict], entrants: list[str], usd_to_eur: float) 
         out.append(f"  {r['entrant']:<22} {r['games']:>5} {r['wins']:>5} {r['win_rate']:>8.1%} "
                    f"{r['mean_net_worth']:>13.0f} {ill:>7} {r['fallbacks']:>9} "
                    f"${r['cost_usd']:>8.2f}  {by_seat}")
+    out += rl_lines(lines)
     tainted = sum(1 for x in lines if api_error_count(x))
     if tainted:
         out.append(f"  WARNING: {tainted} game(s) include fallback moves caused by API errors; "
@@ -470,7 +506,6 @@ def main(argv: list[str] | None = None) -> None:
                     help="play again finished games where API errors forced fallback moves")
     args = ap.parse_args(argv)
 
-    load_dotenv()
     raw = tomllib.loads(Path(args.config).read_text(encoding="utf-8"))
     t = raw.setdefault("tournament", {})
     for key, val in (("seeds", args.seeds), ("first_seed", args.first_seed),
@@ -478,6 +513,8 @@ def main(argv: list[str] | None = None) -> None:
         if val is not None:
             t[key] = val
     spec = parse_tournament(raw, name=Path(args.config).stem)
+    if spec.run.needs_api and not args.summary:  # offline tournaments never read the key
+        load_dotenv()
     out = Path(args.out) if args.out else Path("results") / spec.name
     tour = Tournament(spec, out, force=args.force)
     if args.summary:

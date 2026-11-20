@@ -1,0 +1,34 @@
+# Offline RL tournament (Phase 14): the final RL agent against three rule-based bots,
+# every seed in all 4 seat rotations. No API key, no cost; about 3 minutes.
+#   uv run handel-tournament configs/tournament_rl_offline.toml
+#   uv run handel-analyze results/tournament_rl_offline --value --value-seeds 5
+# --value-seeds 5 values the offers of the first 5 seeds (20 games, about 12 minutes);
+# the whole tournament would take about 20 hours (about 35 s of Monte Carlo per game).
+# Needs the rl dependency group (uv sync --group rl).
+
+[tournament]
+seeds = 500           # seeds 1..500
+rotate = true         # 4 rotations per seed: 2,000 games
+parallel = 1          # games are fast (about 0.05 s); threads would not help (Python GIL)
+save_records = true
+
+[game]
+max_rounds = 150
+
+[[seats]]
+type = "rl"
+name = "rl-agent"
+checkpoint = "models/handel_rl_final.pt"   # Phase 12 agent, trade mode "full"
+sample = false                             # always the most likely action
+
+[[seats]]
+type = "bot"
+bot = "heuristic"
+
+[[seats]]
+type = "bot"
+bot = "always_buy"
+
+[[seats]]
+type = "bot"
+bot = "heuristic_notrade"

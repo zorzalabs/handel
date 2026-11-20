@@ -92,7 +92,10 @@ def draw_board(ax, doc: dict, f: dict, headline: str = "", last: bool = False) -
                 for k in range(h):
                     ax.add_patch(Rectangle((hx + k * 0.15, hy), 0.11, 0.11, fc=TEXT_2, ec="none"))
     ax.text(1.5, 9.35, "Handel", fontsize=15, fontweight="bold", color=TEXT, va="top")
-    ax.text(1.5, 8.55, "LLM agents trade and negotiate · " + doc["meta"]["game_id"], fontsize=6.5,
+    kinds = {pl["kind"] for pl in doc["meta"]["players"]}
+    who = ("LLM agents and an RL agent" if {"llm", "rl"} <= kinds else "An RL agent and bots" if "rl" in kinds
+           else "LLM agents")
+    ax.text(1.5, 8.55, f"{who} trade and negotiate · " + doc["meta"]["game_id"], fontsize=6.5,
             color=MUTED, va="top")
     ax.text(1.5, 7.9, f"Game over · round {f['round'] + 1}" if last else f"Round {f['round'] + 1}",
             fontsize=10, color=TEXT, va="top", fontweight="bold")
@@ -127,11 +130,12 @@ def draw_side(ax, doc: dict, i: int, focus: dict | None) -> None:
         out = f["out"][p]
         alpha = 0.45 if out else 1.0
         _badge(ax, 0.0, y, p, fs=6, va="top", ha="left")
-        ax.text(0.085, y, pl["name"], fontsize=7.5, color=TEXT, va="top", fontweight="bold", alpha=alpha)
+        name = pl["name"] if len(pl["name"]) <= 17 else pl["name"][:16] + "…"
+        ax.text(0.085, y, name, fontsize=7.5, color=TEXT, va="top", fontweight="bold", alpha=alpha)
         status = ("winner" if last and m["winner"] == p else "bankrupt" if out
                   else f"{f['cash'][p]:,} fl · worth {f['worth'][p]:,}")
         color = GOOD if status == "winner" else TEXT_2
-        ax.text(0.45, y, status, fontsize=7, color=color, va="top", alpha=alpha)
+        ax.text(0.52, y, status, fontsize=7, color=color, va="top", alpha=alpha)
         y -= 0.055
     y -= 0.01
     ax.plot([0, 1], [y, y], color=LINE, lw=0.8)
@@ -172,6 +176,7 @@ def draw_side(ax, doc: dict, i: int, focus: dict | None) -> None:
                     prev = ax.annotate(" " + txt, xy=(1, 0), xycoords=prev, va="bottom", fontsize=6.8,
                                        color=col, fontweight="bold" if bold else "normal")
                 y -= 0.04
+            y = _rl_options(ax, doc, s["p"], s["frame"], y)
         else:
             r = n["reply"]
             _badge(ax, 0.0, y, r["p"], fs=6, va="top", ha="left")
@@ -182,6 +187,7 @@ def draw_side(ax, doc: dict, i: int, focus: dict | None) -> None:
                 for line in textwrap.wrap(f"“{r['message']}”", 46)[:4]:
                     ax.text(0, y, line, fontsize=6.8, color=TEXT, va="top", style="italic")
                     y -= 0.033
+            y = _rl_options(ax, doc, r["p"], r["frame"], y)
     else:
         events = []
         for k in range(i, -1, -1):
@@ -196,6 +202,38 @@ def draw_side(ax, doc: dict, i: int, focus: dict | None) -> None:
             y -= 0.04
     ax.text(0, 0.0, "Values: Monte Carlo win probability with bot rollouts (Phase 4).", fontsize=5.5,
             color=MUTED, va="bottom")
+
+
+def _short_option(action: str) -> str:
+    """"Propose [P2: X for Y]" -> "→ P2: X for Y" (the GIF panel is narrow, so the pick mark goes too)."""
+    action = action.replace(" (heuristic pick)", "")
+    for verb, arrow in (("Propose [", "→ "), ("Counter [", "↩ ")):
+        if action.startswith(verb) and action.endswith("]"):
+            return arrow + action[len(verb):-1]
+    return action
+
+
+def _rl_options(ax, doc: dict, p: int, frame: int, y: float) -> float:
+    """If ``p`` is an RL seat that decided at ``frame``, list its top options and value estimate."""
+    notes = [r for r in doc.get("reasoning", []) if r.get("rl") and r["p"] == p and r["frame"] == frame]
+    if not notes:
+        return y
+    rl = notes[-1]["rl"]
+    y -= 0.01
+    ax.text(0, y, "RL agent's options", fontsize=6.8, color=MUTED, va="top")
+    y -= 0.038
+    for o in rl["top"]:
+        chosen = o["action"] == rl["chosen"]
+        ax.add_patch(Rectangle((0, y - 0.022), 0.12 * o["p"], 0.018, fc=PLAYER[p] if chosen else LINE, ec="none"))
+        ax.text(0.135, y, f"{o['p']:.0%}", fontsize=6.4, color=TEXT if chosen else TEXT_2, va="top",
+                fontweight="bold" if chosen else "normal")
+        label = _short_option(o["action"])
+        ax.text(0.24, y, label if len(label) <= 44 else label[:43] + "…", fontsize=6.2,
+                color=TEXT if chosen else TEXT_2, va="top", fontweight="bold" if chosen else "normal")
+        y -= 0.034
+    ax.text(0, y, f"value {rl['value']:+.2f} · about {rl['win_chance']:.0%} to win against equals",
+            fontsize=6.4, color=TEXT_2, va="top")
+    return y - 0.04
 
 
 def plan(doc: dict, every: int = 4, hold_ms: int = 2600, step_ms: int = 110) -> list[tuple[int, dict | None, int]]:
