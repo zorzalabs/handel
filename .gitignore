@@ -8,5 +8,4 @@ dist/
 results/
 .DS_Store
 runs/
-.claude/
 models/eval/

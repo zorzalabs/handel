@@ -1,4 +1,4 @@
-"""Reinforcement learning for Handel : a PPO agent trained by league self-play.
+"""Reinforcement learning for Handel: a PPO agent trained by league self-play.
 
 Modules (import them directly; this package imports nothing so that
 ``handel.rl.actions`` and ``handel.rl.observation`` work without torch):
